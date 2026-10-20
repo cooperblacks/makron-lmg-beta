@@ -155,7 +155,7 @@ export class OrchestratorEngine {
       ? 'Virtual Workspace is currently empty.'
       : `Existing files:\n${existingFiles.map((f) => `- ${f.path} (${f.size} B)`).join('\n')}`;
 
-    const decisionPrompt = `You are Makron SLM Orchestrator. Assess the user's request.
+    const decisionPrompt = `You are a Makron AI agent. Assess the user's request.
 Determine if this task requires tools or virtual filesystem operations (such as creating code files in workspace, reading workspace files, running sandboxed code, fetching URLs, extracting documents) OR if it can be answered directly as conversation, analysis, code explanation, or math without files.
 
 USER REQUEST:
@@ -373,7 +373,7 @@ Respond with ONLY valid JSON:
    */
   private async planTask(ctx: OrchestratorContext, workspaceSummary: string, signal: AbortSignal): Promise<ValidatedRoadmap> {
     const toolDocs = ToolRegistry.getDocumentation();
-    const planPrompt = `You are Makron SLM Orchestrator. Given the user goal and available tools, create a strict JSON execution roadmap.
+    const planPrompt = `You are an AI agent. Given the user goal and available tools, create a strict JSON execution roadmap.
 
 AVAILABLE TOOLS:
 ${toolDocs}
@@ -936,7 +936,7 @@ Provide the smallest useful response: concise direct answer, code snippet or lin
         path: '/config.json',
         content: JSON.stringify(
           {
-            project: 'Makron LMS Orchestration',
+            project: 'Makron LMG Orchestration',
             generatedFor: prompt,
             timestamp: new Date().toISOString(),
             status: 'verified',
@@ -952,7 +952,7 @@ Provide the smallest useful response: concise direct answer, code snippet or lin
     return {
       path: '/src/main.ts',
       content: `/**
- * Generated solution by Makron LMS SLM Orchestrator
+ * Generated solution by the AI agent
  * Purpose: ${prompt}
  */
 

@@ -72,7 +72,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="flex items-center gap-2">
             <span className="text-base font-bold text-neutral-900 dark:text-neutral-100">ꫧ</span>
             <span className="text-xs font-semibold uppercase tracking-wider text-neutral-900 dark:text-neutral-100">
-              Makron LMS
+              Makron LMG
             </span>
           </div>
 

@@ -105,7 +105,7 @@ export const MessageList: React.FC<MessageListProps> = ({
           ꫧ
         </div>
         <h2 className="text-sm font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
-          Makron LMS Orchestrator
+          Makron LMG
         </h2>
         <p className="text-xs text-neutral-500 max-w-sm mt-1">
           Local SLM multi-step execution pipeline with sandboxed tools and virtual filesystem.

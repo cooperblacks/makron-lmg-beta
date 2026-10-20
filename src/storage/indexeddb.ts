@@ -1,6 +1,6 @@
 import { Checkpoint, Conversation, Message, UserSettings, VirtualFile } from '../types';
 
-const DB_NAME = 'makron_lms_db';
+const DB_NAME = 'makron_db';
 const DB_VERSION = 1;
 
 export class LocalStorageDB {
