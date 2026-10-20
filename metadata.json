@@ -1,0 +1,6 @@
+{
+  "name": "Makron LMS",
+  "description": "Production-ready, mobile-first platform for orchestrating self-hosted Transformers.js small language models into capable, multi-step AI agents.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
