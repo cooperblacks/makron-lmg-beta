@@ -5,15 +5,17 @@ import {
   FileCode2,
   FileText,
   Globe,
+  Image as ImageIcon,
   Mic,
-  MicOff,
   Paperclip,
+  Server,
+  SlidersHorizontal,
   Sparkles,
   Square,
   Wrench,
   X,
 } from 'lucide-react';
-import { AVAILABLE_MODELS, modelManager } from '../models/manager';
+import { AVAILABLE_MODELS, modelManager, resolveModelDetails } from '../models/manager';
 import { DocumentParser } from '../documents/parser';
 import { AgentCapabilities, AttachedFile, ExecutionState, ReasoningLevel } from '../types';
 
@@ -34,7 +36,9 @@ interface ComposerProps {
   capabilities: AgentCapabilities;
   onChangeCapabilities: (caps: AgentCapabilities) => void;
   currentModelId?: string;
+  vendorModels?: Record<string, string>;
   onOpenModels?: () => void;
+  onOpenContext?: () => void;
 }
 
 export const Composer: React.FC<ComposerProps> = ({
@@ -47,7 +51,9 @@ export const Composer: React.FC<ComposerProps> = ({
   capabilities,
   onChangeCapabilities,
   currentModelId,
+  vendorModels = {},
   onOpenModels,
+  onOpenContext,
 }) => {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<AttachedFile[]>([]);
@@ -64,8 +70,10 @@ export const Composer: React.FC<ComposerProps> = ({
     executionState === 'reviewing' ||
     executionState === 'downloading_model';
 
-  const currentModel = AVAILABLE_MODELS.find((m) => m.id === currentModelId) || AVAILABLE_MODELS[0];
+  const modelDetails = resolveModelDetails(currentModelId || '', vendorModels);
   const isWebGpu = modelManager.getHasWebGpu();
+  const isExternalModel = !modelDetails.isLocal;
+  const supportsImage = !!modelDetails.supportsVision;
 
   // Web Speech API initialization
   useEffect(() => {
@@ -215,7 +223,7 @@ export const Composer: React.FC<ComposerProps> = ({
     });
   };
 
-  const toggleCapability = (key: 'allowInternet' | 'allowTools' | 'allowFiles') => {
+  const toggleCapability = (key: 'allowInternet' | 'allowTools' | 'allowFiles' | 'allowImage') => {
     onChangeCapabilities({
       ...capabilities,
       [key]: !capabilities[key],
@@ -241,7 +249,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 <button
                   type="button"
                   onClick={() => removeAttachment(file.id)}
-                  className="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 ml-0.5"
+                  className="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 ml-0.5 cursor-pointer"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -258,15 +266,15 @@ export const Composer: React.FC<ComposerProps> = ({
             onChange={handleFileChange}
             multiple
             className="hidden"
-            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.js,.ts,.tsx,.html,.css,.py"
+            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.js,.ts,.tsx,.html,.css,.py,.png,.jpg,.jpeg,.webp"
           />
 
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled || isRunning || isParsingDoc}
-            title="Attach documents (PDF, CSV, TXT, JSON, Code)"
-            className="p-1.5 text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 disabled:opacity-40 rounded transition-colors"
+            title="Attach documents or images"
+            className="p-1.5 text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 disabled:opacity-40 rounded transition-colors cursor-pointer"
           >
             <Paperclip className="w-4 h-4" />
           </button>
@@ -280,7 +288,7 @@ export const Composer: React.FC<ComposerProps> = ({
             placeholder={
               isRunning
                 ? 'Execution in progress...'
-                : 'Direct Makron agent: e.g. "Build an animated timer in /timer.html and test it"'
+                : 'Direct Makron agent: e.g. "Explain and derive the Euler identity in LaTeX" or "Build an animated timer in /timer.html"'
             }
             rows={1}
             className="flex-1 max-h-40 resize-none bg-transparent text-xs sm:text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:outline-hidden py-1 leading-relaxed"
@@ -292,13 +300,13 @@ export const Composer: React.FC<ComposerProps> = ({
             onClick={toggleSpeech}
             disabled={disabled || isRunning}
             title={isListening ? 'Stop listening' : 'Speech to text'}
-            className={`p-1.5 rounded transition-colors shrink-0 ${
+            className={`p-1.5 rounded transition-colors shrink-0 cursor-pointer ${
               isListening
                 ? 'text-red-500 bg-red-100 dark:bg-red-950/60 animate-pulse'
                 : 'text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800'
             }`}
           >
-            {isListening ? <Mic className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            <Mic className="w-4 h-4" />
           </button>
 
           {/* Send / Stop control */}
@@ -307,7 +315,7 @@ export const Composer: React.FC<ComposerProps> = ({
             onClick={handleSubmit}
             disabled={disabled || (!isRunning && !input.trim() && attachments.length === 0)}
             title={isRunning ? 'Stop execution' : 'Send message (Enter)'}
-            className={`p-1.5 rounded transition-all shrink-0 ${
+            className={`p-1.5 rounded transition-all shrink-0 cursor-pointer ${
               isRunning
                 ? 'bg-neutral-800 dark:bg-neutral-200 text-white dark:text-neutral-900 hover:opacity-90'
                 : 'bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 disabled:opacity-20'
@@ -319,14 +327,14 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Capabilities & Reasoning Controls Strip */}
         <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-[11px] font-mono select-none">
-          {/* Capabilities Switches: Auto / Internet / Tools / Files */}
+          {/* Capabilities Switches: Auto / Net / Tools / Files / Image + Context */}
           <div className="flex items-center gap-1 overflow-x-auto py-0.5">
             {/* Auto Button */}
             <button
               type="button"
               onClick={toggleAutoCapabilities}
               title="Auto-detect whether tools/internet/files are required"
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
                 capabilities.autoCapabilities
                   ? 'bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 font-semibold'
                   : 'text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-900'
@@ -343,7 +351,7 @@ export const Composer: React.FC<ComposerProps> = ({
               type="button"
               onClick={() => toggleCapability('allowInternet')}
               title={`Internet Access (${capabilities.allowInternet ? 'Allowed' : 'Blocked'})`}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
                 capabilities.allowInternet
                   ? 'bg-neutral-200 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 font-medium'
                   : 'text-neutral-400 dark:text-neutral-600 line-through opacity-70 hover:opacity-100'
@@ -358,7 +366,7 @@ export const Composer: React.FC<ComposerProps> = ({
               type="button"
               onClick={() => toggleCapability('allowTools')}
               title={`Tool Execution (${capabilities.allowTools ? 'Enabled' : 'Disabled'})`}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
                 capabilities.allowTools
                   ? 'bg-neutral-200 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 font-medium'
                   : 'text-neutral-400 dark:text-neutral-600 line-through opacity-70 hover:opacity-100'
@@ -373,7 +381,7 @@ export const Composer: React.FC<ComposerProps> = ({
               type="button"
               onClick={() => toggleCapability('allowFiles')}
               title={`Virtual Filesystem Creation (${capabilities.allowFiles ? 'Enabled' : 'Disabled'})`}
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
                 capabilities.allowFiles
                   ? 'bg-neutral-200 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 font-medium'
                   : 'text-neutral-400 dark:text-neutral-600 line-through opacity-70 hover:opacity-100'
@@ -382,23 +390,76 @@ export const Composer: React.FC<ComposerProps> = ({
               <FileCode2 className="w-3 h-3" />
               <span>Files</span>
             </button>
+
+            {/* Image Switch (Active only if current model supports vision) */}
+            <button
+              type="button"
+              disabled={!supportsImage}
+              onClick={() => {
+                if (supportsImage) {
+                  toggleCapability('allowImage');
+                }
+              }}
+              title={
+                supportsImage
+                  ? `Multimodal Image Analysis (${capabilities.allowImage ? 'Enabled' : 'Disabled'})`
+                  : `Image input not supported by ${modelDetails.name} (requires a vision-capable model)`
+              }
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+                !supportsImage
+                  ? 'opacity-30 cursor-not-allowed text-neutral-400 dark:text-neutral-600 line-through'
+                  : capabilities.allowImage
+                  ? 'bg-neutral-200 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 font-medium cursor-pointer'
+                  : 'text-neutral-400 dark:text-neutral-600 line-through opacity-70 hover:opacity-100 cursor-pointer'
+              }`}
+            >
+              <ImageIcon className="w-3 h-3" />
+              <span>Image</span>
+            </button>
+
+            <span className="hidden sm:inline text-neutral-300 dark:text-neutral-700">|</span>
+
+            {/* Desktop Context option on the right side of Net / Tools / Files / Image */}
+            <button
+              type="button"
+              onClick={onOpenContext}
+              title="Conversation system prompt & context parameters"
+              className="hidden sm:flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-900 cursor-pointer"
+            >
+              <SlidersHorizontal className="w-3 h-3 text-neutral-500" />
+              <span>Context</span>
+            </button>
           </div>
 
           {/* Right zone: Model selector & Reasoning Power Switcher */}
           <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap">
-            {/* Model Selector placed to the left side of Auto-Low-Med-High-Max */}
+            {/* Model Selector showing provider logo if external model or chip/server icon */}
             <button
               type="button"
               onClick={onOpenModels}
-              title={`Active Model: ${currentModel.name}. Click to switch SLM or manage local weights`}
+              title={`Active Model: ${modelDetails.name}. Click to switch model or configure API keys / Ollama`}
               className="flex items-center gap-1.5 px-2 py-0.5 text-[10px] sm:text-[11px] font-mono text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-900 hover:bg-neutral-200 dark:hover:bg-neutral-800 border border-neutral-200 dark:border-neutral-800 rounded transition-colors whitespace-nowrap cursor-pointer"
             >
-              <Cpu className="w-3 h-3 text-neutral-500 shrink-0" />
+              {isExternalModel && modelDetails.providerLogo ? (
+                <img
+                  src={`https://muxai.vercel.app/logos/${modelDetails.providerLogo}`}
+                  alt={modelDetails.name}
+                  className="w-3.5 h-3.5 rounded-full object-cover shrink-0"
+                  onError={(e) => {
+                    // Fallback to CPU icon if image fails to load
+                    (e.target as HTMLElement).style.display = 'none';
+                  }}
+                />
+              ) : modelDetails.provider === 'ollama' ? (
+                <Server className="w-3 h-3 text-neutral-500 shrink-0" />
+              ) : (
+                <Cpu className="w-3 h-3 text-neutral-500 shrink-0" />
+              )}
               <span className="truncate max-w-[85px] sm:max-w-[125px]">
-                {currentModel.name.split('(')[0].trim()}
+                {modelDetails.name.split('(')[0].trim()}
               </span>
-              <span className="text-[9px] px-1 py-0.2 bg-neutral-200 dark:bg-neutral-800 rounded text-neutral-600 dark:text-neutral-400">
-                {isWebGpu ? 'GPU' : 'WASM'}
+              <span className="text-[9px] px-1 py-0.2 bg-neutral-200 dark:bg-neutral-800 rounded text-neutral-600 dark:text-neutral-400 font-semibold">
+                {modelDetails.provider === 'ollama' ? 'OLLAMA' : isExternalModel ? 'API' : isWebGpu ? 'GPU' : 'WASM'}
               </span>
             </button>
 
@@ -423,6 +484,17 @@ export const Composer: React.FC<ComposerProps> = ({
                 );
               })}
             </div>
+
+            {/* Mobile-only Context button on the right side of the Reasoning Power Switcher */}
+            <button
+              type="button"
+              onClick={onOpenContext}
+              title="Conversation system prompt & context parameters"
+              className="flex sm:hidden items-center gap-1 px-1.5 py-0.5 rounded transition-colors text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 cursor-pointer"
+            >
+              <SlidersHorizontal className="w-3 h-3 text-neutral-500" />
+              <span>Context</span>
+            </button>
           </div>
         </div>
       </div>

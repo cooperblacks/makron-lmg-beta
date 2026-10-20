@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { RotateCcw, Sparkles, X } from 'lucide-react';
 
 interface ContextModalProps {
@@ -18,6 +18,20 @@ export const ContextModal: React.FC<ContextModalProps> = ({
 }) => {
   const [prompt, setPrompt] = useState(systemPrompt);
 
+  useEffect(() => {
+    setPrompt(systemPrompt);
+  }, [systemPrompt, isOpen]);
+
+  // Close on Escape key press
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const handleSave = () => {
@@ -36,8 +50,16 @@ export const ContextModal: React.FC<ContextModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="w-full max-w-lg bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-xl overflow-hidden text-xs">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-lg bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-xl overflow-hidden text-xs"
+      >
         {/* Header */}
         <div className="h-11 px-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -47,7 +69,7 @@ export const ContextModal: React.FC<ContextModalProps> = ({
           <button
             onClick={onClose}
             aria-label="Close dialog"
-            className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+            className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -74,7 +96,7 @@ export const ContextModal: React.FC<ContextModalProps> = ({
                 <button
                   type="button"
                   onClick={handleReuseLast}
-                  className="flex items-center gap-1 text-[11px] text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 underline decoration-neutral-300 dark:decoration-neutral-700"
+                  className="flex items-center gap-1 text-[11px] text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 underline decoration-neutral-300 dark:decoration-neutral-700 cursor-pointer"
                 >
                   <Sparkles className="w-3 h-3" />
                   <span>Reuse Last Prompt</span>
@@ -84,7 +106,7 @@ export const ContextModal: React.FC<ContextModalProps> = ({
                 <button
                   type="button"
                   onClick={handleClear}
-                  className="flex items-center gap-1 text-[11px] text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                  className="flex items-center gap-1 text-[11px] text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 cursor-pointer"
                 >
                   <RotateCcw className="w-3 h-3" />
                   <span>Clear</span>
@@ -103,14 +125,14 @@ export const ContextModal: React.FC<ContextModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-3 py-1.5 rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 font-medium transition-colors"
+            className="px-3 py-1.5 rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 font-medium transition-colors cursor-pointer"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={handleSave}
-            className="px-3 py-1.5 rounded bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 font-medium hover:opacity-90 transition-opacity"
+            className="px-3 py-1.5 rounded bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 font-medium hover:opacity-90 transition-opacity cursor-pointer"
           >
             Apply Context
           </button>

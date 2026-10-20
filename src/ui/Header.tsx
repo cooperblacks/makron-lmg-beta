@@ -84,17 +84,8 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Center/Action zone: Context prompt, Virtual Files */}
+      {/* Center/Action zone: Virtual Files */}
       <div className="flex items-center gap-1.5 sm:gap-2">
-        {/* Context Button */}
-        <button
-          onClick={onOpenContext}
-          title="Conversation system prompt & context"
-          className="px-2 py-1 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-900 rounded transition-colors whitespace-nowrap"
-        >
-          Context
-        </button>
-
         {/* Workspace Files Button */}
         <button
           onClick={onOpenWorkspace}

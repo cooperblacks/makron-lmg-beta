@@ -6,7 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { eventBus, OrchestratorEvent } from './events/emitter';
 import { VirtualFileSystem } from './filesystem/virtualFs';
-import { AVAILABLE_MODELS } from './models/manager';
+import { AVAILABLE_MODELS, resolveModelDetails } from './models/manager';
 import { orchestrator } from './orchestrator/engine';
 import { db } from './storage/indexeddb';
 import {
@@ -49,6 +49,7 @@ export default function App() {
     allowInternet: false,
     allowTools: true,
     allowFiles: true,
+    allowImage: false,
     autoCapabilities: true,
   });
 
@@ -88,6 +89,12 @@ export default function App() {
           savedSettings.defaultModelId = normalized;
           await db.saveSettings(savedSettings);
         }
+      }
+
+      // Default to SmolLM2 135M if not specified or legacy Qwen default
+      if (!savedSettings.defaultModelId || savedSettings.defaultModelId === 'onnx-community/Qwen2.5-0.5B-Instruct') {
+        savedSettings.defaultModelId = 'onnx-community/SmolLM2-135M-Instruct-ONNX';
+        await db.saveSettings(savedSettings);
       }
 
       setSettings(savedSettings);
@@ -273,6 +280,10 @@ export default function App() {
 
   const handleSelectModel = async (modelId: string) => {
     if (!activeConv) return;
+    const details = resolveModelDetails(modelId, settings.vendorModels || {});
+    if (!details.supportsVision && capabilities.allowImage) {
+      setCapabilities((prev) => ({ ...prev, allowImage: false }));
+    }
     const updated = { ...activeConv, modelId, updatedAt: Date.now() };
     await db.saveConversation(updated);
     setActiveConv(updated);
@@ -387,6 +398,10 @@ export default function App() {
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         storageUsage={storageUsage}
+        onOpenSettings={() => {
+          setIsSidebarOpen(false);
+          setIsSettingsModalOpen(true);
+        }}
       />
 
       {/* Main Workspace Frame */}
@@ -441,7 +456,9 @@ export default function App() {
           capabilities={capabilities}
           onChangeCapabilities={setCapabilities}
           currentModelId={activeConv?.modelId || settings.defaultModelId}
+          vendorModels={settings.vendorModels || {}}
           onOpenModels={() => setIsModelModalOpen(true)}
+          onOpenContext={() => setIsContextModalOpen(true)}
         />
       </div>
 
@@ -478,6 +495,33 @@ export default function App() {
         }}
         onChangeDevice={async (dev) => {
           const updated = { ...settings, devicePreference: dev };
+          setSettings(updated);
+          await db.saveSettings(updated);
+        }}
+        apiKeys={settings.apiKeys || {}}
+        onUpdateApiKey={async (provider, key) => {
+          const updated = {
+            ...settings,
+            apiKeys: { ...(settings.apiKeys || {}), [provider]: key },
+          };
+          if (provider === 'huggingface') {
+            updated.hfToken = key;
+          }
+          setSettings(updated);
+          await db.saveSettings(updated);
+        }}
+        vendorModels={settings.vendorModels || {}}
+        onUpdateVendorModel={async (provider, model) => {
+          const updated = {
+            ...settings,
+            vendorModels: { ...(settings.vendorModels || {}), [provider]: model },
+          };
+          setSettings(updated);
+          await db.saveSettings(updated);
+        }}
+        ollamaUrl={settings.ollamaUrl || ''}
+        onUpdateOllamaUrl={async (url) => {
+          const updated = { ...settings, ollamaUrl: url };
           setSettings(updated);
           await db.saveSettings(updated);
         }}

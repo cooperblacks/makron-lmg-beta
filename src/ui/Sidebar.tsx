@@ -12,6 +12,7 @@ interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
   storageUsage: { usage: number; quota: number };
+  onOpenSettings?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -24,12 +25,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpen,
   onClose,
   storageUsage,
+  onOpenSettings,
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const startRename = (conv: Conversation, e: React.MouseEvent) => {
     e.stopPropagation();
+    setConfirmDeleteId(null);
     setEditingId(conv.id);
     setEditTitle(conv.title);
   };
@@ -149,29 +153,63 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
 
                   {editingId !== conv.id && (
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button
-                        type="button"
-                        onClick={(e) => startRename(conv, e)}
-                        title="Rename conversation"
-                        aria-label="Rename conversation"
-                        className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded"
-                      >
-                        <Pencil className="w-3 h-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteConversation(conv.id);
-                        }}
-                        title="Delete conversation"
-                        aria-label="Delete conversation"
-                        className="p-1 text-neutral-400 hover:text-red-500 rounded"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
+                    <>
+                      {confirmDeleteId === conv.id ? (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1.5 bg-red-100 dark:bg-red-950/80 border border-red-300 dark:border-red-800 px-1.5 py-0.5 rounded text-[11px] text-red-700 dark:text-red-300 shrink-0"
+                        >
+                          <span className="font-semibold text-[10px]">Delete?</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeleteConversation(conv.id);
+                              setConfirmDeleteId(null);
+                            }}
+                            title="Confirm delete conversation"
+                            className="px-1.5 py-0.5 bg-red-600 hover:bg-red-700 text-white rounded text-[10px] font-bold cursor-pointer transition-colors"
+                          >
+                            Yes
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmDeleteId(null);
+                            }}
+                            title="Cancel delete"
+                            className="p-0.5 text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={(e) => startRename(conv, e)}
+                            title="Rename conversation"
+                            aria-label="Rename conversation"
+                            className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded cursor-pointer"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmDeleteId(conv.id);
+                            }}
+                            title="Delete conversation"
+                            aria-label="Delete conversation"
+                            className="p-1 text-neutral-400 hover:text-red-500 rounded cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               );
@@ -179,8 +217,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
 
-        {/* Footer: Storage Info */}
-        <div className="p-3 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950 text-[11px] text-neutral-500 font-mono">
+        {/* Footer: Storage Info (Clicking opens Settings Modal) */}
+        <div
+          onClick={() => {
+            if (onOpenSettings) {
+              onOpenSettings();
+            }
+          }}
+          title="Click to open settings and storage management"
+          className="p-3 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950 text-[11px] text-neutral-500 font-mono cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors select-none"
+        >
           <div className="flex items-center justify-between mb-1">
             <span className="flex items-center gap-1.5 text-neutral-600 dark:text-neutral-400">
               <HardDrive className="w-3 h-3" />

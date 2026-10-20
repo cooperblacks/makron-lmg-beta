@@ -240,11 +240,12 @@ export class LocalStorageDB {
   async getSettings(): Promise<UserSettings> {
     const defaultSettings: UserSettings = {
       theme: 'dark',
-      defaultModelId: 'onnx-community/Qwen2.5-0.5B-Instruct',
+      defaultModelId: 'onnx-community/SmolLM2-135M-Instruct-ONNX',
       devicePreference: 'webgpu',
       autoApproveTools: false,
       lastNonEmptySystemPrompt: 'You are an expert autonomous software engineer and analyst. Break down goals into structured steps and use available tools to build precise solutions.',
       maxRepairAttempts: 2,
+      ollamaUrl: '',
     };
 
     try {

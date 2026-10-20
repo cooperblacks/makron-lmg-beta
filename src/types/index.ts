@@ -97,6 +97,19 @@ export interface Checkpoint {
   files: Record<string, string>; // path -> content
 }
 
+export type ModelProvider =
+  | 'local'
+  | 'ollama'
+  | 'openai'
+  | 'gemini'
+  | 'claude'
+  | 'grok'
+  | 'groq'
+  | 'qwen'
+  | 'deepseek'
+  | 'zai'
+  | 'huggingface';
+
 export interface ModelConfig {
   id: string;
   name: string;
@@ -106,6 +119,9 @@ export interface ModelConfig {
   recommendedDevice: 'webgpu' | 'wasm';
   contextWindow: number;
   isCustom?: boolean;
+  provider?: ModelProvider;
+  providerLogo?: string;
+  supportsVision?: boolean;
 }
 
 export interface UserSettings {
@@ -116,6 +132,9 @@ export interface UserSettings {
   lastNonEmptySystemPrompt: string;
   maxRepairAttempts: number;
   hfToken?: string;
+  apiKeys?: Record<string, string>;
+  vendorModels?: Record<string, string>;
+  ollamaUrl?: string;
 }
 
 export type ExecutionState =
@@ -135,5 +154,6 @@ export interface AgentCapabilities {
   allowInternet: boolean;
   allowTools: boolean;
   allowFiles: boolean;
+  allowImage?: boolean;
   autoCapabilities: boolean;
 }

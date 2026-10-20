@@ -6,7 +6,12 @@ env.useBrowserCache = true;
 
 let currentGenerator: any = null;
 let currentModelId: string | null = null;
+let isLoadingInProgress = false;
 let isAborted = false;
+
+// Per-file progress tracker to avoid progress rubber-banding
+const fileProgressMap: Record<string, number> = {};
+let maxMonotonicProgress = 0;
 
 self.addEventListener('message', async (e: MessageEvent) => {
   const { type, data } = e.data;
@@ -25,14 +30,25 @@ self.addEventListener('message', async (e: MessageEvent) => {
   if (type === 'LOAD_MODEL') {
     const { modelId, device = 'wasm', dtype = 'q4', hfToken } = data;
 
+    // Guard: if already loaded and cached, respond immediately
+    if (currentGenerator && currentModelId === modelId) {
+      self.postMessage({ type: 'LOAD_COMPLETE', data: { modelId, cached: true } });
+      return;
+    }
+
+    // Guard: if already loading this exact model, do not re-run in parallel
+    if (isLoadingInProgress && currentModelId === modelId) {
+      return;
+    }
+
+    isLoadingInProgress = true;
+    currentModelId = modelId;
+    maxMonotonicProgress = 0;
+    Object.keys(fileProgressMap).forEach((k) => delete fileProgressMap[k]);
+
     try {
       if (hfToken) {
         (env as any).token = hfToken;
-      }
-
-      if (currentGenerator && currentModelId === modelId) {
-        self.postMessage({ type: 'LOAD_COMPLETE', data: { modelId, cached: true } });
-        return;
       }
 
       self.postMessage({
@@ -53,12 +69,21 @@ self.addEventListener('message', async (e: MessageEvent) => {
         device: device === 'webgpu' ? 'webgpu' : 'wasm',
         dtype: dtype || 'q4',
         progress_callback: (progressData: any) => {
+          const file = progressData.file || 'weights';
+          const fileP = typeof progressData.progress === 'number' ? Math.round(progressData.progress) : 0;
+          fileProgressMap[file] = fileP;
+
+          // Compute aggregate progress across seen files
+          const values = Object.values(fileProgressMap);
+          const avg = values.length > 0 ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : fileP;
+          maxMonotonicProgress = Math.max(maxMonotonicProgress, avg);
+
           self.postMessage({
             type: 'PROGRESS',
             data: {
               status: progressData.status || 'progress',
-              file: progressData.file || '',
-              progress: typeof progressData.progress === 'number' ? Math.round(progressData.progress) : 0,
+              file,
+              progress: Math.min(99, maxMonotonicProgress),
               loaded: progressData.loaded || 0,
               total: progressData.total || 0,
             },
@@ -72,9 +97,11 @@ self.addEventListener('message', async (e: MessageEvent) => {
 
       currentGenerator = await pipeline('text-generation', modelId, pipelineOptions);
 
+      isLoadingInProgress = false;
       currentModelId = modelId;
       self.postMessage({ type: 'LOAD_COMPLETE', data: { modelId } });
     } catch (err: any) {
+      isLoadingInProgress = false;
       console.error('Worker model load failed:', err);
       let errorMsg = err.message || String(err);
       if (errorMsg.includes('Unauthorized access to file')) {
@@ -138,7 +165,6 @@ self.addEventListener('message', async (e: MessageEvent) => {
         if (typeof output[0] === 'object' && output[0].generated_text) {
           const gen = output[0].generated_text;
           if (Array.isArray(gen)) {
-            // chat array
             const lastMsg = gen[gen.length - 1];
             fullText = lastMsg.content || '';
           } else {

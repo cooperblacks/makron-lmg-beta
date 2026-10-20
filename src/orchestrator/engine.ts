@@ -1,6 +1,6 @@
 import { eventBus } from '../events/emitter';
 import { VirtualFileSystem } from '../filesystem/virtualFs';
-import { AVAILABLE_MODELS, modelManager } from '../models/manager';
+import { AVAILABLE_MODELS, modelManager, resolveModelDetails } from '../models/manager';
 import { RoadmapSchema, ValidatedRoadmap } from '../schemas/orchestrator';
 import { db } from '../storage/indexeddb';
 import { ToolRegistry } from '../tools/registry';
@@ -90,9 +90,35 @@ export class OrchestratorEngine {
     }
   }
 
-  /**
-   * Run the complete 8-stage agent orchestration
-   */
+  private async generateWithModel(
+    ctx: OrchestratorContext,
+    options: {
+      messages?: Array<{ role: string; content: string }>;
+      prompt?: string;
+      maxNewTokens?: number;
+      temperature?: number;
+      onToken?: (token: string) => void;
+      signal?: AbortSignal;
+    }
+  ): Promise<string> {
+    const details = resolveModelDetails(ctx.modelId, ctx.settings.vendorModels);
+    const apiKey = details.provider && details.provider !== 'local' ? ctx.settings.apiKeys?.[details.provider] : undefined;
+
+    return modelManager.generate({
+      modelId: ctx.modelId,
+      provider: details.provider,
+      apiKey,
+      ollamaUrl: ctx.settings.ollamaUrl,
+      vendorModels: ctx.settings.vendorModels,
+      messages: options.messages,
+      prompt: options.prompt,
+      maxNewTokens: options.maxNewTokens,
+      temperature: options.temperature,
+      onToken: options.onToken,
+      signal: options.signal,
+    });
+  }
+
   /**
    * Run the complete agent orchestration pipeline
    */
@@ -105,44 +131,70 @@ export class OrchestratorEngine {
     const startTime = Date.now();
 
     // 1. Ensure Model is genuinely loaded (No mock fallbacks!)
-    const model = AVAILABLE_MODELS.find((m) => m.id === ctx.modelId) || AVAILABLE_MODELS[0];
-    if (!modelManager.getIsLoaded() || modelManager.getCurrentModelId() !== model.id) {
-      eventBus.emit({ type: 'state_change', state: 'downloading_model', messageId: ctx.messageId });
+    const details = resolveModelDetails(ctx.modelId, ctx.settings.vendorModels);
+    const isExternal = !details.isLocal;
 
-      const unsub = modelManager.onProgress((p) => {
-        eventBus.emit({
-          type: 'model_progress',
-          messageId: ctx.messageId,
-          modelId: model.id,
-          progress: p.progress,
-          loaded: p.loaded,
-          total: p.total,
-          file: p.file,
-          text: `Downloading ${model.name}...`,
+    if (isExternal) {
+      if (details.provider !== 'ollama') {
+        const apiKey = ctx.settings.apiKeys?.[details.provider || ''];
+        if (!apiKey || !apiKey.trim()) {
+          const errorText = `API key for "${details.name}" (${details.provider?.toUpperCase()}) is not configured. Please open the Model selector to enter your API key.`;
+          eventBus.emit({ type: 'error', error: errorText, messageId: ctx.messageId });
+          eventBus.emit({ type: 'state_change', state: 'failed', messageId: ctx.messageId });
+
+          const errorMsg: Message = {
+            id: ctx.messageId,
+            conversationId: ctx.conversationId,
+            role: 'assistant',
+            content: errorText,
+            timestamp: startTime,
+            status: 'error',
+          };
+          await db.saveMessage(errorMsg);
+          this.activeAbortController = null;
+          return errorMsg;
+        }
+      }
+    } else {
+      const model = AVAILABLE_MODELS.find((m) => m.id === ctx.modelId) || AVAILABLE_MODELS[0];
+      if (!modelManager.getIsLoaded() || modelManager.getCurrentModelId() !== model.id) {
+        eventBus.emit({ type: 'state_change', state: 'downloading_model', messageId: ctx.messageId });
+
+        const unsub = modelManager.onProgress((p) => {
+          eventBus.emit({
+            type: 'model_progress',
+            messageId: ctx.messageId,
+            modelId: model.id,
+            progress: p.progress,
+            loaded: p.loaded,
+            total: p.total,
+            file: p.file,
+            text: `Loading ${model.name}...`,
+          });
         });
-      });
 
-      try {
-        await modelManager.loadModel(model.id, ctx.settings.devicePreference, model.defaultDtype, ctx.settings.hfToken);
-      } catch (err: any) {
-        unsub();
-        const errorText = `Model loading failed: ${err.message || String(err)}`;
-        eventBus.emit({ type: 'error', error: errorText, messageId: ctx.messageId });
-        eventBus.emit({ type: 'state_change', state: 'failed', messageId: ctx.messageId });
+        try {
+          await modelManager.loadModel(model.id, ctx.settings.devicePreference, model.defaultDtype, ctx.settings.hfToken);
+        } catch (err: any) {
+          unsub();
+          const errorText = `Model loading failed: ${err.message || String(err)}`;
+          eventBus.emit({ type: 'error', error: errorText, messageId: ctx.messageId });
+          eventBus.emit({ type: 'state_change', state: 'failed', messageId: ctx.messageId });
 
-        const errorMsg: Message = {
-          id: ctx.messageId,
-          conversationId: ctx.conversationId,
-          role: 'assistant',
-          content: `Failed to load model "${model.name}". ${err.message}`,
-          timestamp: startTime,
-          status: 'error',
-        };
-        await db.saveMessage(errorMsg);
-        this.activeAbortController = null;
-        return errorMsg;
-      } finally {
-        unsub();
+          const errorMsg: Message = {
+            id: ctx.messageId,
+            conversationId: ctx.conversationId,
+            role: 'assistant',
+            content: `Failed to load model "${model.name}". ${err.message}`,
+            timestamp: startTime,
+            status: 'error',
+          };
+          await db.saveMessage(errorMsg);
+          this.activeAbortController = null;
+          return errorMsg;
+        } finally {
+          unsub();
+        }
       }
     }
 
@@ -180,7 +232,7 @@ Respond with ONLY valid JSON:
     } else {
       // 'auto' mode: model assesses intent
       try {
-        const decisionRaw = await modelManager.generate({
+        const decisionRaw = await this.generateWithModel(ctx, {
           messages: [
             { role: 'system', content: ctx.systemPrompt || 'You are an autonomous orchestrator.' },
             { role: 'user', content: decisionPrompt },
@@ -244,7 +296,7 @@ Respond with ONLY valid JSON:
       let directText = '';
 
       try {
-        directText = await modelManager.generate({
+        directText = await this.generateWithModel(ctx, {
           messages: [
             { role: 'system', content: ctx.systemPrompt || 'You are a helpful and concise AI assistant.' },
             { role: 'user', content: ctx.userPrompt },
@@ -402,7 +454,7 @@ RULES:
 }
 - Do not output markdown codeblocks if possible, or wrap in \`\`\`json. Keep steps focused and actionable.`;
 
-    const rawOutput = await modelManager.generate({
+    const rawOutput = await this.generateWithModel(ctx, {
       messages: [
         { role: 'system', content: ctx.systemPrompt || 'You are an autonomous orchestrator.' },
         { role: 'user', content: planPrompt },
@@ -663,9 +715,9 @@ If you don't need a tool or have finished, provide the step findings.`;
     let stepOutput = '';
     let toolCallCandidate: { tool: string; params: any } | null = null;
 
-    if (modelManager.getIsLoaded()) {
+    if (modelManager.getIsLoaded() || (AVAILABLE_MODELS.find((m) => m.id === ctx.modelId)?.provider !== 'local')) {
       try {
-        stepOutput = await modelManager.generate({
+        stepOutput = await this.generateWithModel(ctx, {
           messages: [
             { role: 'system', content: ctx.systemPrompt || 'You are an autonomous agent step executor.' },
             { role: 'user', content: stepPrompt },
@@ -866,7 +918,7 @@ If you don't need a tool or have finished, provide the step findings.`;
         uniqueFiles.map((p) => `- \`${p}\``).join('\n');
     }
 
-    if (modelManager.getIsLoaded()) {
+    if (modelManager.getIsLoaded() || (AVAILABLE_MODELS.find((m) => m.id === ctx.modelId)?.provider !== 'local')) {
       try {
         const prompt = `Review complete.
 USER REQUEST: "${ctx.userPrompt}"
@@ -875,7 +927,7 @@ GENERATED FILES: ${uniqueFiles.join(', ') || 'None'}
 
 Provide the smallest useful response: concise direct answer, code snippet or link to generated files. No filler or promotional text.`;
 
-        const res = await modelManager.generate({
+        const res = await this.generateWithModel(ctx, {
           messages: [{ role: 'user', content: prompt }],
           maxNewTokens: 256,
           temperature: 0.1,

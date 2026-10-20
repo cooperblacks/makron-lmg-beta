@@ -70,6 +70,15 @@ export const WorkspaceDrawer: React.FC<WorkspaceDrawerProps> = ({
     }
   }, [isOpen, conversationId, initialFilePath]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const handleSelectFile = (file: VirtualFile) => {
@@ -142,8 +151,16 @@ export const WorkspaceDrawer: React.FC<WorkspaceDrawerProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
-      <div className="w-full max-w-4xl h-[90vh] sm:h-[80vh] bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-2xl flex flex-col overflow-hidden text-xs">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-4xl h-[90vh] sm:h-[80vh] bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-2xl flex flex-col overflow-hidden text-xs"
+      >
         {/* Top Header */}
         <div className="h-12 px-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">

@@ -1,19 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
-  Check,
   Cpu,
   Download,
   FileCode2,
   HardDrive,
   History,
   MessageSquare,
-  Shield,
-  Trash2,
   Upload,
   X,
 } from 'lucide-react';
-import { AVAILABLE_MODELS } from '../models/manager';
 import { db } from '../storage/indexeddb';
 import { UserSettings } from '../types';
 
@@ -73,7 +69,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setConfirmingCategory(null);
       setConfirmingCache(false);
     }
-  }, [isOpen]);
+  }, [isOpen, settings]);
+
+  // Close on Escape key press
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -115,7 +121,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleExportBackup = async () => {
     const convs = await db.getConversations();
-    const files = await db.getFiles(convs[0]?.id || '');
     const allFiles: any[] = [];
     for (const c of convs) {
       const f = await db.getFiles(c.id);
@@ -168,8 +173,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
-      <div className="w-full max-w-xl bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-xl overflow-hidden text-xs flex flex-col max-h-[85vh]">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-xl bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-xl overflow-hidden text-xs flex flex-col max-h-[85vh]"
+      >
         {/* Header */}
         <div className="h-12 px-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
@@ -179,7 +192,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             onClick={onClose}
             aria-label="Close dialog"
-            className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+            className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -190,7 +203,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {importNotification && (
             <div className="p-2.5 rounded bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 text-xs flex items-center justify-between">
               <span>{importNotification}</span>
-              <button onClick={() => setImportNotification(null)} className="text-neutral-400">
+              <button onClick={() => setImportNotification(null)} className="text-neutral-400 cursor-pointer">
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -238,14 +251,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleClearCategory('conversations')}
-                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors"
+                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors cursor-pointer"
                     >
                       Delete?
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirmingCategory(null)}
-                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 cursor-pointer"
                     >
                       Cancel
                     </button>
@@ -255,7 +268,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={() => setConfirmingCategory('conversations')}
                     disabled={stats.conversationsCount === 0}
-                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors"
+                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors cursor-pointer"
                   >
                     Clear Conversations
                   </button>
@@ -280,14 +293,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleClearCategory('virtual_files')}
-                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors"
+                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors cursor-pointer"
                     >
                       Delete?
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirmingCategory(null)}
-                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 cursor-pointer"
                     >
                       Cancel
                     </button>
@@ -297,7 +310,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={() => setConfirmingCategory('virtual_files')}
                     disabled={stats.filesCount === 0}
-                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors"
+                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors cursor-pointer"
                   >
                     Clear Files
                   </button>
@@ -322,14 +335,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleClearCategory('checkpoints')}
-                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors"
+                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors cursor-pointer"
                     >
                       Delete?
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirmingCategory(null)}
-                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 cursor-pointer"
                     >
                       Cancel
                     </button>
@@ -339,7 +352,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={() => setConfirmingCategory('checkpoints')}
                     disabled={stats.checkpointsCount === 0}
-                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors"
+                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors cursor-pointer"
                   >
                     Clear Snapshots
                   </button>
@@ -366,14 +379,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleClearModelCache()}
-                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors"
+                      className="px-2 py-0.5 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors cursor-pointer"
                     >
                       Purge?
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirmingCache(false)}
-                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                      className="px-2 py-0.5 text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 cursor-pointer"
                     >
                       Cancel
                     </button>
@@ -383,7 +396,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={() => setConfirmingCache(true)}
                     disabled={cachedModelKeys.length === 0}
-                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors"
+                    className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded disabled:opacity-30 transition-colors cursor-pointer"
                   >
                     Purge Model Cache
                   </button>
@@ -408,7 +421,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <button
                 type="button"
                 onClick={handleExportBackup}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded bg-neutral-50 dark:bg-neutral-900 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200 font-medium transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded bg-neutral-50 dark:bg-neutral-900 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200 font-medium transition-colors cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Export Full Backup</span>
@@ -417,7 +430,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded bg-neutral-50 dark:bg-neutral-900 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200 font-medium transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded bg-neutral-50 dark:bg-neutral-900 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200 font-medium transition-colors cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span>Import Backup</span>
@@ -448,7 +461,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={handlePerformDoubleConfirmWipe}
                     disabled={confirmInput.trim().toUpperCase() !== 'CONFIRM'}
-                    className="px-3 py-1.5 bg-red-600 text-white rounded font-medium text-xs disabled:opacity-40 hover:bg-red-700 transition-colors"
+                    className="px-3 py-1.5 bg-red-600 text-white rounded font-medium text-xs disabled:opacity-40 hover:bg-red-700 transition-colors cursor-pointer"
                   >
                     Wipe Everything
                   </button>
@@ -458,7 +471,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       setIsWipingAll(false);
                       setConfirmInput('');
                     }}
-                    className="px-2 py-1.5 text-neutral-600 dark:text-neutral-400 hover:text-neutral-900"
+                    className="px-2 py-1.5 text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -477,7 +490,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsWipingAll(true)}
-                  className="px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400 border border-red-300 dark:border-red-900/60 hover:bg-red-50 dark:hover:bg-red-950/40 rounded transition-colors"
+                  className="px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400 border border-red-300 dark:border-red-900/60 hover:bg-red-50 dark:hover:bg-red-950/40 rounded transition-colors cursor-pointer"
                 >
                   Wipe All Storage
                 </button>
@@ -491,7 +504,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-3 py-1 rounded bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 font-medium"
+            className="px-3 py-1 rounded bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 font-medium cursor-pointer"
           >
             Done
           </button>
