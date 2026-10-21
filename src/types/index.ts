@@ -157,3 +157,35 @@ export interface AgentCapabilities {
   allowImage?: boolean;
   autoCapabilities: boolean;
 }
+
+export type UserTier = 'free' | 'paid';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name?: string;
+  tier: UserTier;
+  agentCount?: number;
+  apiKeysConfigured?: string[];
+}
+
+export type AgentThemePreset = 'slate' | 'emerald' | 'indigo' | 'crimson' | 'amber' | 'violet' | 'custom';
+
+export interface CustomAgent {
+  id: string;
+  userId: string;
+  customName: string; // The URL slug: /agent/{custom-name}
+  displayName: string;
+  description?: string;
+  avatar: string; // Emoji, SVG, or icon name
+  systemPrompt: string; // Context & knowledge base
+  effortLevel: ReasoningLevel;
+  skills: string[]; // e.g. ['code_execution', 'file_generation', 'web_search', 'doc_extract']
+  themeColor: string; // Primary hex color or CSS color
+  themePreset: AgentThemePreset;
+  allowsFileUploads: boolean;
+  embedEnabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+

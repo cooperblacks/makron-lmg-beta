@@ -24,6 +24,7 @@ export interface OrchestratorContext {
   settings: UserSettings;
   reasoningLevel?: ReasoningLevel;
   capabilities?: AgentCapabilities;
+  recentMessages?: Message[];
 }
 
 export class OrchestratorEngine {
@@ -52,6 +53,82 @@ export class OrchestratorEngine {
       pending.resolve(approved);
       this.pendingApprovals.delete(toolCallId);
     }
+  }
+
+  /**
+   * Scans text for multi-file declarations (Bolt.new, v0.dev, Lovable, Markdown file codeblocks)
+   * and saves all extracted files into the VirtualFileSystem workspace.
+   */
+  async extractAndPersistFiles(
+    conversationId: string,
+    text: string
+  ): Promise<Array<{ path: string; action: 'create' | 'update' }>> {
+    const changes: Array<{ path: string; action: 'create' | 'update' }> = [];
+    if (!text) return changes;
+
+    const filesToSave: Array<{ path: string; content: string }> = [];
+
+    // Pattern 1: ```lang:filepath or ```lang file="filepath" or ```lang path="filepath"
+    const codeBlockFileRegex = /```(?:[a-zA-Z0-9_-]+)?(?::|\s+file="|\s+path="|\s+filename=")([^\s"\n]+)[\r\n]+([\s\S]*?)```/g;
+    let match: RegExpExecArray | null;
+    while ((match = codeBlockFileRegex.exec(text)) !== null) {
+      const rawPath = match[1].trim();
+      const content = match[2].trimEnd();
+      if (rawPath && content) {
+        filesToSave.push({ path: rawPath, content });
+      }
+    }
+
+    // Pattern 2: ```lang\n// file: /path ... ``` or /* file: /path */ or <!-- file: /path -->
+    const commentFileRegex = /```[a-zA-Z0-9_-]*\n(?:\/\/|\/\*|<!--|#)\s*(?:file:|filepath:|path:)?\s*([^\s\n*]+)(?:\*\/|-->)?\n([\s\S]*?)```/g;
+    while ((match = commentFileRegex.exec(text)) !== null) {
+      const rawPath = match[1].trim();
+      const content = match[2].trimEnd();
+      if (rawPath && content && !filesToSave.some((f) => f.path === rawPath)) {
+        filesToSave.push({ path: rawPath, content });
+      }
+    }
+
+    // Pattern 3: <file path="...">...</file> or <boltAction type="file" filePath="...">...</boltAction>
+    const xmlFileRegex = /<(?:file\s+path|boltAction\s+type="file"\s+filePath)="([^"]+)">([\s\S]*?)<\/(?:file|boltAction)>/g;
+    while ((match = xmlFileRegex.exec(text)) !== null) {
+      const rawPath = match[1].trim();
+      const content = match[2].trim();
+      if (rawPath && content && !filesToSave.some((f) => f.path === rawPath)) {
+        filesToSave.push({ path: rawPath, content });
+      }
+    }
+
+    // Pattern 4: Check if text contains JSON tool call or files array
+    const parsed = this.extractJson<any>(text);
+    if (parsed) {
+      if (parsed.tool === 'file_write' && parsed.params?.path && parsed.params?.content) {
+        filesToSave.push({ path: parsed.params.path, content: parsed.params.content });
+      } else if (Array.isArray(parsed.files)) {
+        for (const f of parsed.files) {
+          if (f.path && f.content) filesToSave.push({ path: f.path, content: f.content });
+        }
+      }
+    }
+
+    // Write all extracted files to VirtualFileSystem
+    for (const item of filesToSave) {
+      try {
+        const normalized = item.path.startsWith('/') ? item.path : '/' + item.path;
+        const res = await VirtualFileSystem.writeFile(conversationId, normalized, item.content);
+        changes.push({ path: res.file.path, action: res.action });
+        eventBus.emit({
+          type: 'file_changed',
+          path: res.file.path,
+          action: res.action,
+          conversationId,
+        });
+      } catch (err) {
+        console.warn(`Failed to persist file ${item.path}:`, err);
+      }
+    }
+
+    return changes;
   }
 
   /**
@@ -104,13 +181,42 @@ export class OrchestratorEngine {
     const details = resolveModelDetails(ctx.modelId, ctx.settings.vendorModels);
     const apiKey = details.provider && details.provider !== 'local' ? ctx.settings.apiKeys?.[details.provider] : undefined;
 
+    let finalMessages = options.messages;
+
+    // Inject recent conversation history so the LLM remembers previous context, code, and questions
+    if (finalMessages && ctx.recentMessages && ctx.recentMessages.length > 0) {
+      const systemMsg = finalMessages.find((m) => m.role === 'system');
+      const nonSystemMsgs = finalMessages.filter((m) => m.role !== 'system');
+
+      const historyTurns: Array<{ role: string; content: string }> = [];
+      for (const msg of ctx.recentMessages) {
+        if (msg.id === ctx.messageId) continue;
+        if (msg.role === 'user' && msg.content) {
+          historyTurns.push({ role: 'user', content: msg.content });
+        } else if (msg.role === 'assistant' && msg.content && msg.status !== 'error') {
+          // Truncate overly long previous assistant messages in context to preserve token window
+          const content = msg.content.length > 2500 ? msg.content.slice(0, 2500) + '... [truncated previous output]' : msg.content;
+          historyTurns.push({ role: 'assistant', content });
+        }
+      }
+
+      // Keep recent turns (up to 12 most recent turns)
+      const trimmedHistory = historyTurns.slice(-12);
+
+      finalMessages = [
+        ...(systemMsg ? [systemMsg] : []),
+        ...trimmedHistory,
+        ...nonSystemMsgs,
+      ];
+    }
+
     return modelManager.generate({
       modelId: ctx.modelId,
       provider: details.provider,
       apiKey,
       ollamaUrl: ctx.settings.ollamaUrl,
       vendorModels: ctx.settings.vendorModels,
-      messages: options.messages,
+      messages: finalMessages,
       prompt: options.prompt,
       maxNewTokens: options.maxNewTokens,
       temperature: options.temperature,
@@ -223,85 +329,110 @@ Respond with ONLY valid JSON:
 }`;
 
     const level = ctx.reasoningLevel || 'auto';
-    let isDirect = false;
 
+    // -------------------------------------------------------------------------
+    // LOW REASONING LEVEL: Skips the roadmap mechanism entirely
+    // Passes user prompt and recent history directly to the LLM with direct streaming
+    // -------------------------------------------------------------------------
     if (level === 'low') {
-      isDirect = true;
-    } else if (level === 'med' || level === 'high' || level === 'max') {
-      isDirect = false;
-    } else {
-      // 'auto' mode: model assesses intent
-      try {
-        const decisionRaw = await this.generateWithModel(ctx, {
-          messages: [
-            { role: 'system', content: ctx.systemPrompt || 'You are an autonomous orchestrator.' },
-            { role: 'user', content: decisionPrompt },
-          ],
-          maxNewTokens: 128,
-          temperature: 0.1,
-          signal,
-        });
-
-        const parsedDecision = this.extractJson<{ mode?: string; reasoning?: string }>(decisionRaw);
-        if (parsedDecision?.mode === 'direct') {
-          isDirect = true;
-        } else if (parsedDecision?.mode === 'workflow') {
-          isDirect = false;
-        } else {
-          // Natural heuristic check if JSON wasn't explicit
-          const requiresFilesOrTools =
-            /create file|build (a|an) (app|site|website|page|component|script)|write (to|in) \/|run code|in \/index|in \/src/i.test(
-              ctx.userPrompt
-            );
-          isDirect = !requiresFilesOrTools;
-        }
-      } catch {
-        if (signal.aborted) throw new Error('EXECUTION_CANCELLED');
-        isDirect = true;
-      }
-    }
-
-    // --- DIRECT EXECUTION PATH (FAST LATENCY WITH EXPLICIT THINKING PROCESS) ---
-    if (isDirect) {
       eventBus.emit({ type: 'state_change', state: 'running', messageId: ctx.messageId });
 
-      const directStep: ExecutionStepRecord = {
-        id: 'step_direct_analysis',
-        stepNumber: 1,
-        title: 'Intent Assessment & Direct Synthesis',
-        status: 'running',
-        startTime: Date.now(),
-        toolCalls: [],
-        fileChanges: [],
-      };
-
-      const directRoadmap: ValidatedRoadmap = {
-        objective: ctx.userPrompt.slice(0, 80),
-        steps: [
-          {
-            id: 'step_direct_analysis',
-            title: 'Intent Assessment & Direct Synthesis',
-            description: `Evaluated request under reasoning mode "${level.toUpperCase()}". Direct synthesis selected for optimal latency without requiring disk or filesystem mutations.`,
-            requiredTools: [],
-            expectedOutput: 'Concise verified answer',
-            dependencies: [],
-          },
-        ],
-        completionCriteria: ['Clear direct answer generated without unnecessary disk overhead'],
-      };
-
-      eventBus.emit({ type: 'roadmap_generated', roadmap: directRoadmap, messageId: ctx.messageId });
-      eventBus.emit({ type: 'step_start', step: { ...directStep }, messageId: ctx.messageId });
-
       let directText = '';
-
       try {
         directText = await this.generateWithModel(ctx, {
           messages: [
-            { role: 'system', content: ctx.systemPrompt || 'You are a helpful and concise AI assistant.' },
+            {
+              role: 'system',
+              content:
+                ctx.systemPrompt ||
+                'You are an expert AI software engineer. Provide direct, fast, accurate responses. When asked to code, output complete and working code.',
+            },
             { role: 'user', content: ctx.userPrompt },
           ],
-          maxNewTokens: 1024,
+          maxNewTokens: 2048,
+          temperature: 0.2,
+          onToken: (tok) => {
+            directText += tok;
+            eventBus.emit({ type: 'final_token', token: tok, messageId: ctx.messageId });
+          },
+          signal,
+        });
+      } catch (err: any) {
+        if (signal.aborted) throw new Error('EXECUTION_CANCELLED');
+        directText = `Generation error: ${err.message || String(err)}`;
+      }
+
+      // Automatically scan and persist any multi-file codeblocks generated
+      await this.extractAndPersistFiles(ctx.conversationId, directText);
+
+      const directMsg: Message = {
+        id: ctx.messageId,
+        conversationId: ctx.conversationId,
+        role: 'assistant',
+        content: directText.trim(),
+        timestamp: startTime,
+        status: 'completed',
+      };
+
+      await db.saveMessage(directMsg);
+      eventBus.emit({ type: 'completed', messageId: ctx.messageId, finalOutput: directText.trim() });
+      eventBus.emit({ type: 'state_change', state: 'completed', messageId: ctx.messageId });
+      this.activeAbortController = null;
+      return directMsg;
+    }
+
+    // Check workspace state for multi-step planning
+    const existingFiles = await VirtualFileSystem.listFiles(ctx.conversationId);
+    const workspaceSummary = existingFiles.length === 0
+      ? 'Virtual Workspace is currently empty.'
+      : `Existing files:\n${existingFiles.map((f) => `- ${f.path} (${f.size} B)`).join('\n')}`;
+
+    // For AUTO level, assess whether to use fast direct synthesis or multi-step workflow
+    let isDirect = false;
+    if (level === 'auto') {
+      const isSimpleQuery =
+        /^(hi|hello|hey|help|who are you|what is|why is|explain|translate|summarize|calculate|2\+|[0-9+\-*/]+)\b/i.test(
+          ctx.userPrompt.trim()
+        ) && !/build|create (app|site|file|dashboard|game)|code|write|scaffold/i.test(ctx.userPrompt);
+
+      if (isSimpleQuery) {
+        isDirect = true;
+      } else {
+        try {
+          const decisionRaw = await this.generateWithModel(ctx, {
+            messages: [
+              { role: 'system', content: ctx.systemPrompt || 'You are an autonomous orchestrator.' },
+              {
+                role: 'user',
+                content: `Assess if this user request can be answered directly as conversation without creating workspace files, or if it requires multi-file coding or tools:\n"${ctx.userPrompt}"\n\nReturn ONLY JSON: {"mode": "direct" | "workflow"}`,
+              },
+            ],
+            maxNewTokens: 64,
+            temperature: 0.1,
+            signal,
+          });
+
+          const parsed = this.extractJson<{ mode?: string }>(decisionRaw);
+          isDirect = parsed?.mode === 'direct';
+        } catch {
+          if (signal.aborted) throw new Error('EXECUTION_CANCELLED');
+          isDirect = false;
+        }
+      }
+    }
+
+    // Direct path for auto when user asked a conversational/simple question
+    if (isDirect) {
+      eventBus.emit({ type: 'state_change', state: 'running', messageId: ctx.messageId });
+
+      let directText = '';
+      try {
+        directText = await this.generateWithModel(ctx, {
+          messages: [
+            { role: 'system', content: ctx.systemPrompt || 'You are an expert AI assistant.' },
+            { role: 'user', content: ctx.userPrompt },
+          ],
+          maxNewTokens: 2048,
           temperature: 0.2,
           onToken: (tok) => {
             directText += tok;
@@ -314,10 +445,7 @@ Respond with ONLY valid JSON:
         directText = `Generation error: ${err.message}`;
       }
 
-      directStep.status = 'completed';
-      directStep.endTime = Date.now();
-      directStep.output = `Evaluated user intent and formulated response (${directText.length} characters). Model responded in direct synthesis mode under reasoning power "${level.toUpperCase()}".`;
-      eventBus.emit({ type: 'step_update', step: { ...directStep }, messageId: ctx.messageId });
+      await this.extractAndPersistFiles(ctx.conversationId, directText);
 
       const directMsg: Message = {
         id: ctx.messageId,
@@ -325,8 +453,6 @@ Respond with ONLY valid JSON:
         role: 'assistant',
         content: directText.trim(),
         timestamp: startTime,
-        roadmap: directRoadmap,
-        executionSteps: [directStep],
         status: 'completed',
       };
 
@@ -698,6 +824,9 @@ RULES:
       .map((s) => `Step ${s.stepNumber} (${s.title}): ${s.output?.slice(0, 200)}`)
       .join('\n');
 
+    const level = ctx.reasoningLevel || 'auto';
+    const tokenLimit = level === 'max' ? 4096 : level === 'high' ? 3072 : 2048;
+
     const stepPrompt = `You are executing Step ${stepRecord.stepNumber}: "${planStep.title}".
 DESCRIPTION: ${planStep.description}
 EXPECTED OUTPUT: ${planStep.expectedOutput}
@@ -708,9 +837,14 @@ ${priorContext || 'None'}
 USER REQUEST:
 "${ctx.userPrompt}"
 
-If you need to use a tool, return a JSON tool request:
-{"tool": "file_write", "params": {"path": "/index.js", "content": "..."}}
-If you don't need a tool or have finished, provide the step findings.`;
+If you need to create or modify one or multiple files in the workspace (like Bolt.new, v0.dev, or Lovable), output complete files using this codeblock syntax:
+\`\`\`typescript:/src/App.tsx
+// code
+\`\`\`
+Or return a tool call JSON:
+{"tool": "file_write", "params": {"path": "/index.html", "content": "..."}}
+
+If you don't need a tool or have finished, provide the step findings and solution details.`;
 
     let stepOutput = '';
     let toolCallCandidate: { tool: string; params: any } | null = null;
@@ -719,10 +853,10 @@ If you don't need a tool or have finished, provide the step findings.`;
       try {
         stepOutput = await this.generateWithModel(ctx, {
           messages: [
-            { role: 'system', content: ctx.systemPrompt || 'You are an autonomous agent step executor.' },
+            { role: 'system', content: ctx.systemPrompt || 'You are an autonomous agent step executor. When coding, generate clean, complete, production-ready code.' },
             { role: 'user', content: stepPrompt },
           ],
-          maxNewTokens: 512,
+          maxNewTokens: tokenLimit,
           temperature: 0.2,
           onToken: (tok) => {
             eventBus.emit({ type: 'step_token', token: tok, stepId: stepRecord.id, messageId: ctx.messageId });
@@ -735,7 +869,14 @@ If you don't need a tool or have finished, provide the step findings.`;
       }
     }
 
-    // If model returned a structured tool call:
+    // 1. Scan output and persist any multiple files declared in the output
+    const extractedFiles = await this.extractAndPersistFiles(ctx.conversationId, stepOutput);
+    if (extractedFiles.length > 0) {
+      if (!stepRecord.fileChanges) stepRecord.fileChanges = [];
+      stepRecord.fileChanges.push(...extractedFiles);
+    }
+
+    // 2. If model returned a structured tool call:
     if (toolCallCandidate && toolCallCandidate.tool && ToolRegistry.get(toolCallCandidate.tool)) {
       await this.invokeToolWithApproval(ctx, stepRecord, toolCallCandidate.tool, toolCallCandidate.params, signal);
     } else {
@@ -745,16 +886,14 @@ If you don't need a tool or have finished, provide the step findings.`;
         await this.invokeToolWithApproval(ctx, stepRecord, 'file_list', {}, signal);
       } else if (
         requiredTools.includes('file_write') &&
-        /write|create file|generate file|\.html|\.ts|\.js|\.json|\.csv/i.test(ctx.userPrompt)
+        extractedFiles.length === 0 &&
+        /write|create|build|scaffold|app|site|website|page|component|script|\.html|\.ts|\.js|\.json|\.csv/i.test(ctx.userPrompt)
       ) {
-        const generatedFile = this.synthesizeFileFromPrompt(ctx.userPrompt, planStep.title);
-        await this.invokeToolWithApproval(
-          ctx,
-          stepRecord,
-          'file_write',
-          { path: generatedFile.path, content: generatedFile.content },
-          signal
-        );
+        const generatedFiles = await this.synthesizeMultiFilesFromPrompt(ctx.conversationId, ctx.userPrompt, planStep.title);
+        if (generatedFiles.length > 0) {
+          if (!stepRecord.fileChanges) stepRecord.fileChanges = [];
+          stepRecord.fileChanges.push(...generatedFiles);
+        }
       } else if (requiredTools.includes('doc_extract')) {
         await this.invokeToolWithApproval(ctx, stepRecord, 'doc_extract', { query: ctx.userPrompt.slice(0, 30) }, signal);
       }
@@ -946,45 +1085,190 @@ Provide the smallest useful response: concise direct answer, code snippet or lin
   }
 
   /**
-   * Synthesizes appropriate code or document content when writing files
+   * Synthesizes appropriate code or document content when writing files,
+   * supporting multi-file scaffolding like Bolt.new, v0.dev, and Lovable.
    */
-  private synthesizeFileFromPrompt(prompt: string, stepTitle: string): { path: string; content: string } {
+  private async synthesizeMultiFilesFromPrompt(
+    conversationId: string,
+    prompt: string,
+    stepTitle: string
+  ): Promise<Array<{ path: string; action: 'create' | 'update' }>> {
     const lower = prompt.toLowerCase();
 
-    if (lower.includes('html') || lower.includes('website') || lower.includes('landing')) {
-      return {
+    const filesToCreate: Array<{ path: string; content: string }> = [];
+
+    const isWebOrApp =
+      lower.includes('html') ||
+      lower.includes('website') ||
+      lower.includes('landing') ||
+      lower.includes('app') ||
+      lower.includes('dashboard') ||
+      lower.includes('calculator') ||
+      lower.includes('game') ||
+      lower.includes('tool');
+
+    if (isWebOrApp) {
+      const title = prompt.slice(0, 32).trim();
+
+      filesToCreate.push({
         path: '/index.html',
         content: `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Application</title>
-  <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0a0a0a; color: #ededed; }
-    h1 { font-weight: 600; letter-spacing: -0.02em; }
-    .card { background: #141414; border: 1px solid #262626; border-radius: 8px; padding: 1.5rem; margin-top: 1rem; }
-  </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${title || 'Makron App'}</title>
+  <link rel="stylesheet" href="/src/styles.css" />
 </head>
-<body>
-  <h1>Makron Generated Workspace</h1>
-  <div class="card">
-    <p>Automated output for: <em>${prompt.replace(/</g, '&lt;')}</em></p>
+<body class="bg-neutral-950 text-neutral-100 min-h-screen flex flex-col font-sans antialiased">
+  <div id="app" class="flex-1 flex flex-col max-w-4xl w-full mx-auto p-4 sm:p-6">
+    <header class="py-4 border-b border-neutral-800 flex items-center justify-between">
+      <div class="flex items-center gap-2.5">
+        <span class="text-xl font-bold text-blue-500">ꫧ</span>
+        <h1 class="text-lg font-semibold tracking-tight text-neutral-100">${title || 'Makron Application'}</h1>
+      </div>
+      <span class="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">v1.0.0</span>
+    </header>
+
+    <main class="flex-1 py-6 space-y-6">
+      <section class="p-6 rounded-xl bg-neutral-900/60 border border-neutral-800/80 shadow-lg">
+        <h2 class="text-base font-medium text-neutral-200 mb-2">Live Interactive Workspace</h2>
+        <p class="text-xs text-neutral-400 mb-4 leading-relaxed">
+          Application generated autonomously for: <em class="text-neutral-300">${prompt.replace(/</g, '&lt;')}</em>
+        </p>
+        <div id="action-container" class="flex flex-wrap gap-3">
+          <button id="btn-primary" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium cursor-pointer transition shadow-md">
+            Execute Action
+          </button>
+          <button id="btn-reset" class="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-medium cursor-pointer transition">
+            Reset
+          </button>
+        </div>
+      </section>
+
+      <section id="output-card" class="p-4 rounded-xl bg-neutral-900/40 border border-neutral-800/50">
+        <div class="flex items-center justify-between text-xs text-neutral-400 mb-2">
+          <span class="font-mono">Console Output</span>
+          <span id="status-badge" class="text-emerald-400 font-mono">Ready</span>
+        </div>
+        <pre id="output-log" class="font-mono text-xs text-neutral-300 bg-neutral-950 p-3 rounded-lg overflow-x-auto border border-neutral-800/40 min-h-[90px]">Waiting for interaction...</pre>
+      </section>
+    </main>
   </div>
+
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>`,
-      };
+      });
+
+      filesToCreate.push({
+        path: '/src/styles.css',
+        content: `/* Makron Workspace Stylesheet */
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, Menlo, Monaco, Consolas, monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #0a0a0a;
+  color: #ededed;
+  margin: 0;
+  padding: 0;
+}
+
+button:active {
+  transform: scale(0.98);
+}
+`,
+      });
+
+      filesToCreate.push({
+        path: '/src/main.ts',
+        content: `/**
+ * Core Application Logic
+ * Generated for: ${prompt}
+ */
+
+export class AppState {
+  private count: number = 0;
+  private logs: string[] = [];
+
+  constructor() {
+    this.initUI();
+  }
+
+  private initUI() {
+    const btnPrimary = document.getElementById('btn-primary');
+    const btnReset = document.getElementById('btn-reset');
+    const outputLog = document.getElementById('output-log');
+    const statusBadge = document.getElementById('status-badge');
+
+    btnPrimary?.addEventListener('click', () => {
+      this.count++;
+      this.appendLog(\`[ACTION] Interaction recorded (count: \${this.count}) at \${new Date().toLocaleTimeString()}\`);
+      if (statusBadge) statusBadge.innerText = 'Active';
+    });
+
+    btnReset?.addEventListener('click', () => {
+      this.count = 0;
+      this.logs = [];
+      if (outputLog) outputLog.innerText = 'Log cleared. Ready.';
+      if (statusBadge) statusBadge.innerText = 'Ready';
+    });
+  }
+
+  private appendLog(msg: string) {
+    this.logs.unshift(msg);
+    const outputLog = document.getElementById('output-log');
+    if (outputLog) {
+      outputLog.innerText = this.logs.slice(0, 10).join('\\n');
+    }
+  }
+}
+
+// Instantiate
+new AppState();
+`,
+      });
+
+      filesToCreate.push({
+        path: '/package.json',
+        content: JSON.stringify(
+          {
+            name: 'makron-workspace-app',
+            version: '1.0.0',
+            private: true,
+            description: prompt,
+            scripts: {
+              dev: 'vite',
+              build: 'vite build',
+            },
+          },
+          null,
+          2
+        ),
+      });
+
+      filesToCreate.push({
+        path: '/README.md',
+        content: `# Application Workspace\n\nAutomated multi-file application generated by Makron agent for:\n> ${prompt}\n\n### Project Files\n- \`/index.html\`: Document root\n- \`/src/main.ts\`: Core TypeScript interactive logic\n- \`/src/styles.css\`: Design and layout styles\n- \`/package.json\`: Manifest\n`,
+      });
     }
 
-    if (lower.includes('csv') || lower.includes('data') || lower.includes('spreadsheet')) {
-      return {
+    else if (lower.includes('csv') || lower.includes('data') || lower.includes('spreadsheet')) {
+      filesToCreate.push({
         path: '/data/metrics.csv',
         content: `id,metric,value,timestamp\n1,throughput,420,2026-10-20T05:00:00Z\n2,latency_p95,12.4,2026-10-20T05:01:00Z\n3,success_rate,99.98,2026-10-20T05:02:00Z\n4,active_workers,8,2026-10-20T05:03:00Z`,
-      };
+      });
+      filesToCreate.push({
+        path: '/src/analyze.ts',
+        content: `export function computeMetrics(csvData: string) {\n  const lines = csvData.trim().split('\\n');\n  return { rows: lines.length - 1, processedAt: new Date().toISOString() };\n}\n`,
+      });
     }
 
-    if (lower.includes('json') || lower.includes('config')) {
-      return {
+    else if (lower.includes('json') || lower.includes('config')) {
+      filesToCreate.push({
         path: '/config.json',
         content: JSON.stringify(
           {
@@ -997,12 +1281,45 @@ Provide the smallest useful response: concise direct answer, code snippet or lin
           null,
           2
         ),
-      };
+      });
     }
 
-    // Default code file
-    return {
-      path: '/src/main.ts',
+    else {
+      filesToCreate.push({
+        path: '/src/main.ts',
+        content: [
+          '/**',
+          ' * Generated solution by AI agent',
+          ' * Purpose: ' + prompt,
+          ' */',
+          '',
+          'export function executeTask(): { success: boolean; timestamp: number } {',
+          '  console.log("Executing task logic...");',
+          '  return {',
+          '    success: true,',
+          '    timestamp: Date.now()',
+          '  };',
+          '}',
+          '',
+          'console.log(executeTask());',
+        ].join('\n'),
+      });
+    }
+
+    const recordedChanges: Array<{ path: string; action: 'create' | 'update' }> = [];
+    for (const item of filesToCreate) {
+      const res = await VirtualFileSystem.writeFile(conversationId, item.path, item.content);
+      recordedChanges.push({ path: res.file.path, action: res.action });
+      eventBus.emit({
+        type: 'file_changed',
+        path: res.file.path,
+        action: res.action,
+        conversationId,
+      });
+    }
+
+    return recordedChanges;
+  }
       content: `/**
  * Generated solution by the AI agent
  * Purpose: ${prompt}
