@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { PublicAgentOwner, VerifiedType } from '../types';
+import { modelManager, resolveModelDetails } from '../models/manager';
 import { VerifiedBadge } from './VerifiedBadge';
 
 interface PublishedAgentViewProps {
@@ -28,6 +29,7 @@ interface PublicAgent {
   avatar: string;
   modelId?: string;
   gender?: 'male' | 'female' | 'neutral';
+  systemPrompt?: string;
   effortLevel: string;
   skills: string[];
   themeColor: string;
@@ -199,6 +201,104 @@ export const PublishedAgentView: React.FC<PublishedAgentViewProps> = ({ customNa
     window.speechSynthesis.speak(utterance);
   };
 
+  const [modelLoadingText, setModelLoadingText] = useState<string | null>(null);
+  const [agentStatus, setAgentStatus] = useState<'Active' | 'Idle' | 'Offline' | 'Checking'>('Checking');
+
+  useEffect(() => {
+    const unsub = modelManager.onProgress((p) => {
+      if (p.status === 'progress' && p.progress < 100) {
+        setModelLoadingText(`Loading model weights: ${p.progress}%`);
+      } else if (p.status === 'ready' || p.status === 'done') {
+        setModelLoadingText(null);
+        setAgentStatus('Active');
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!agent) return;
+
+    let isMounted = true;
+
+    const checkStatus = async () => {
+      const targetModel = agent.modelId || 'gemini-2.5-flash';
+      const modelDetails = resolveModelDetails(targetModel);
+
+      // 1. If relying on browser-based model: show "Idle" if not preloaded or not found in browser storage, else "Active"
+      if (modelDetails.isLocal) {
+        if (modelManager.getIsLoaded() && modelManager.getCurrentModelId() === modelDetails.id) {
+          if (isMounted) setAgentStatus('Active');
+          return;
+        }
+
+        let foundInStorage = false;
+        if (typeof window !== 'undefined') {
+          // Check Cache API
+          if ('caches' in window) {
+            try {
+              const cacheKeys = await window.caches.keys();
+              const modelKeyFragment = (modelDetails.id.split('/').pop() || modelDetails.id).toLowerCase();
+              for (const key of cacheKeys) {
+                if (key.includes('transformers') || key.includes('onnx') || key.includes('huggingface')) {
+                  const cache = await window.caches.open(key);
+                  const requests = await cache.keys();
+                  if (requests.some((r) => r.url.toLowerCase().includes(modelKeyFragment))) {
+                    foundInStorage = true;
+                    break;
+                  }
+                }
+              }
+            } catch {
+              // cache error
+            }
+          }
+
+          // Check IndexedDB
+          if (!foundInStorage && 'indexedDB' in window && typeof indexedDB.databases === 'function') {
+            try {
+              const dbs = await indexedDB.databases();
+              if (dbs.some((d) => d.name && (d.name.includes('transformers') || d.name.includes('onnx')))) {
+                foundInStorage = true;
+              }
+            } catch {
+              // idb error
+            }
+          }
+        }
+
+        if (isMounted) {
+          setAgentStatus(foundInStorage ? 'Active' : 'Idle');
+        }
+        return;
+      }
+
+      // 2. If depends on API key or Ollama server: ping them to show active status on frontend, else "Offline"
+      try {
+        const res = await fetch(`/api/public/agents/${encodeURIComponent(customName)}/status`);
+        if (!isMounted) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (data.type === 'browser') {
+            setAgentStatus(modelManager.getIsLoaded() ? 'Active' : 'Idle');
+          } else {
+            setAgentStatus(data.active ? 'Active' : 'Offline');
+          }
+        } else {
+          setAgentStatus('Offline');
+        }
+      } catch {
+        if (isMounted) setAgentStatus('Offline');
+      }
+    };
+
+    checkStatus();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [agent, customName]);
+
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if ((!input.trim() && attachedFiles.length === 0) || sending || !agent) return;
@@ -226,33 +326,88 @@ export const PublishedAgentView: React.FC<PublishedAgentViewProps> = ({ customNa
     setSending(true);
 
     try {
-      const history = nextMessages
-        .filter((m) => m.id !== 'welcome')
-        .slice(-10)
-        .map((m) => ({ role: m.role, content: m.content }));
+      const modelDetails = resolveModelDetails(agent.modelId || '');
+      const isLocalModel = modelDetails.isLocal;
 
-      const res = await fetch(`/api/public/agents/${encodeURIComponent(customName)}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: userText || 'Please inspect the attached documents.',
-          history,
-          attachments: currentFiles,
-        }),
-      });
+      if (isLocalModel) {
+        // Execute client-side via Transformers.js in the visitor's browser
+        if (!modelManager.getIsLoaded() || modelManager.getCurrentModelId() !== modelDetails.id) {
+          setModelLoadingText(`Loading ${modelDetails.name} weights...`);
+          await modelManager.loadModel(modelDetails.id, 'webgpu');
+          setModelLoadingText(null);
+        }
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Chat request failed');
+        const effortInstruction =
+          agent.effortLevel === 'low'
+            ? 'Provide direct, concise, immediate answers without preamble.'
+            : agent.effortLevel === 'high' || agent.effortLevel === 'max'
+            ? 'Provide comprehensive, thoroughly analyzed and structured multi-step solutions with detailed code or operational blueprints where appropriate.'
+            : 'Provide balanced, well-reasoned, actionable assistance.';
+
+        const systemInstruction = `You are "${agent.displayName}", an AI assistant.\n${agent.description ? `Description: ${agent.description}\n` : ''}${agent.systemPrompt ? `Context & Directives:\n${agent.systemPrompt}\n` : ''}\nEffort & Reasoning Policy: ${effortInstruction}`;
+
+        const history = nextMessages
+          .filter((m) => m.id !== 'welcome')
+          .slice(-10)
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        let attachmentsText = '';
+        if (agent.allowsFileUploads && currentFiles.length > 0) {
+          attachmentsText =
+            '\n\nAttached User Documents:\n' +
+            currentFiles.map((a: any) => `[File: ${a.name}]\n${a.content || ''}`).join('\n\n');
+        }
+
+        const messagesPayload = [
+          { role: 'system', content: systemInstruction },
+          ...history,
+          { role: 'user', content: (userText || 'Please inspect attached documents') + attachmentsText },
+        ];
+
+        const generatedText = await modelManager.generate({
+          modelId: modelDetails.id,
+          messages: messagesPayload,
+          maxNewTokens: 1024,
+          temperature: agent.effortLevel === 'low' ? 0.2 : 0.6,
+        });
+
+        const botMsg: ChatMessage = {
+          id: 'bot_' + Date.now(),
+          role: 'assistant',
+          content: generatedText || 'I have completed your request.',
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, botMsg]);
+      } else {
+        // Cloud API model - request server endpoint
+        const history = nextMessages
+          .filter((m) => m.id !== 'welcome')
+          .slice(-10)
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        const res = await fetch(`/api/public/agents/${encodeURIComponent(customName)}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: userText || 'Please inspect the attached documents.',
+            history,
+            attachments: currentFiles,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Chat request failed');
+        }
+
+        const botMsg: ChatMessage = {
+          id: 'bot_' + Date.now(),
+          role: 'assistant',
+          content: data.response || 'No response returned.',
+          timestamp: data.timestamp || Date.now(),
+        };
+        setMessages((prev) => [...prev, botMsg]);
       }
-
-      const botMsg: ChatMessage = {
-        id: 'bot_' + Date.now(),
-        role: 'assistant',
-        content: data.response || 'No response returned.',
-        timestamp: data.timestamp || Date.now(),
-      };
-      setMessages((prev) => [...prev, botMsg]);
     } catch (err: any) {
       setMessages((prev) => [
         ...prev,
@@ -264,6 +419,7 @@ export const PublishedAgentView: React.FC<PublishedAgentViewProps> = ({ customNa
         },
       ]);
     } finally {
+      setModelLoadingText(null);
       setSending(false);
     }
   };
@@ -356,10 +512,30 @@ export const PublishedAgentView: React.FC<PublishedAgentViewProps> = ({ customNa
               <h1 className="text-xs sm:text-sm font-semibold tracking-tight truncate">
                 {agent.displayName}
               </h1>
-              <span className="flex items-center gap-1 text-[10px] text-emerald-500 font-medium font-mono shrink-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Active
-              </span>
+              {agentStatus === 'Active' && (
+                <span className="flex items-center gap-1 text-[10px] text-emerald-500 font-medium font-mono shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Active
+                </span>
+              )}
+              {agentStatus === 'Idle' && (
+                <span className="flex items-center gap-1 text-[10px] text-amber-500 dark:text-amber-400 font-medium font-mono shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  Idle
+                </span>
+              )}
+              {agentStatus === 'Offline' && (
+                <span className="flex items-center gap-1 text-[10px] text-neutral-400 dark:text-neutral-500 font-medium font-mono shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-neutral-400 dark:bg-neutral-600" />
+                  Offline
+                </span>
+              )}
+              {agentStatus === 'Checking' && (
+                <span className="flex items-center gap-1 text-[10px] text-neutral-400 font-medium font-mono shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-neutral-400 animate-pulse" />
+                  Checking...
+                </span>
+              )}
             </div>
             {agent.description && (
               <p className="text-[11px] opacity-70 line-clamp-1 truncate max-w-xs sm:max-w-md">
@@ -512,7 +688,7 @@ export const PublishedAgentView: React.FC<PublishedAgentViewProps> = ({ customNa
               }}
             >
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span className="opacity-70">Thinking...</span>
+              <span className="opacity-70">{modelLoadingText || 'Thinking...'}</span>
             </div>
           </div>
         )}

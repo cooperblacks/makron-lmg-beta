@@ -19,10 +19,6 @@ export interface ExternalGenerateOptions {
 export async function generateExternalModel(options: ExternalGenerateOptions): Promise<string> {
   const { modelId, provider, apiKey, ollamaUrl, messages, prompt, temperature = 0.3, maxTokens = 2048, onToken, signal } = options;
 
-  if (provider !== 'ollama' && (!apiKey || !apiKey.trim())) {
-    throw new Error(`API key for provider "${provider}" is not configured. Please enter your API key in the Model selector.`);
-  }
-
   const cleanKey = apiKey ? apiKey.trim() : '';
 
   // Extract clean model name: e.g. "openai:gpt-4o" -> "gpt-4o", "gemini:gemini-2.5-flash" -> "gemini-2.5-flash", "ollama:llama3.2" -> "llama3.2"
@@ -42,6 +38,42 @@ export async function generateExternalModel(options: ExternalGenerateOptions): P
           imageBase64: m.imageBase64,
         }))
       : [{ role: 'user', content: prompt || '' }];
+
+  // If external provider key is not locally set, route to unified /api/chat server proxy
+  if (provider !== 'ollama' && !cleanKey) {
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('makron_auth_token') : null;
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          modelId,
+          provider,
+          messages: formattedMessages,
+          prompt,
+          temperature,
+          maxTokens,
+        }),
+        signal,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.response) {
+          if (onToken) onToken(data.response);
+          return data.response;
+        }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `API key for provider "${provider}" is not configured. Please enter your API key in the Model selector or account.`);
+      }
+    } catch (proxyErr: any) {
+      throw new Error(proxyErr.message || `API key for provider "${provider}" is not configured.`);
+    }
+  }
 
   // 1. Ollama Server (Local or Ngrok Tunnel)
   if (provider === 'ollama') {

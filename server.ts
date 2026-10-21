@@ -152,13 +152,13 @@ app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res: Response) => 
 
 app.put('/api/auth/profile', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, username, email, avatar, verifiedType } = req.body;
+    const { name, username, email, avatar } = req.body;
+    // Users are not allowed to set their own verification badge
     const updated = await dbService.updateUserProfile(req.user!.id, {
       name,
       username,
       email,
       avatar,
-      verifiedType,
     });
     res.json({
       user: {
@@ -174,6 +174,44 @@ app.put('/api/auth/profile', requireAuth, async (req: AuthRequest, res: Response
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update profile' });
+  }
+});
+
+// Ping Ollama endpoint for connection health checks
+app.get('/api/ping-ollama', async (req: Request, res: Response) => {
+  try {
+    const urlParam = req.query.url as string;
+    const rawUrl = urlParam?.trim() || 'http://localhost:11434';
+    const baseUrl = rawUrl.replace(/\/+$/, '');
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+
+    let checkRes: any = null;
+    try {
+      checkRes = await fetch(`${baseUrl}/api/version`, {
+        method: 'GET',
+        headers: { 'ngrok-skip-browser-warning': 'true' },
+        signal: controller.signal,
+      });
+    } catch {
+      checkRes = await fetch(`${baseUrl}/api/tags`, {
+        method: 'GET',
+        headers: { 'ngrok-skip-browser-warning': 'true' },
+        signal: controller.signal,
+      }).catch(() => null);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (checkRes && checkRes.ok) {
+      const data = await checkRes.json().catch(() => ({}));
+      return res.json({ success: true, version: data.version || 'connected' });
+    } else {
+      return res.status(502).json({ success: false, error: 'Ollama server did not return a 200 OK status' });
+    }
+  } catch (err: any) {
+    return res.status(502).json({ success: false, error: err.message || 'Ollama ping failed' });
   }
 });
 
@@ -245,6 +283,115 @@ app.delete('/api/agents/:id', requireAuth, async (req: AuthRequest, res: Respons
 });
 
 // -----------------------------------------------------------------------------
+// CONVERSATION PUBLISHING & DERIVATIVE AGENT SYNC
+// -----------------------------------------------------------------------------
+
+app.post('/api/conversations/publish', async (req: Request, res: Response) => {
+  try {
+    let userId = 'guest_user';
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const user = await dbService.getUserBySessionToken(token);
+      if (user) {
+        userId = user.id;
+      }
+    }
+
+    // Ensure owner row exists in DB
+    await dbService.ensureGuestUser(userId);
+
+    const {
+      customName,
+      displayName,
+      description,
+      avatar,
+      modelId,
+      gender,
+      systemPrompt,
+      effortLevel,
+      skills,
+      themeColor,
+      themePreset,
+      themeMode,
+      allowsFileUploads,
+      embedEnabled,
+    } = req.body;
+
+    if (!customName || typeof customName !== 'string') {
+      return res.status(400).json({ error: 'Valid custom URL name is required' });
+    }
+
+    const cleanSlug = customName
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9_-]/g, '-');
+
+    // Check if an agent already exists with this customName
+    let agent = await dbService.getAgentByCustomName(cleanSlug);
+    if (agent) {
+      // Update existing
+      agent = await dbService.updateAgent(agent.id, agent.userId, {
+        displayName: displayName || cleanSlug,
+        description: description || '',
+        avatar: avatar || 'ꫧ',
+        modelId: modelId || 'gemini-2.5-flash',
+        gender: gender || 'neutral',
+        systemPrompt: systemPrompt || '',
+        effortLevel: effortLevel || 'auto',
+        skills: Array.isArray(skills) ? skills : ['code_execution', 'file_generation'],
+        themeColor: themeColor || '#8b5cf6',
+        themePreset: themePreset || 'winter_midnight',
+        themeMode: themeMode || 'dark',
+        allowsFileUploads: Boolean(allowsFileUploads),
+        embedEnabled: embedEnabled !== false,
+      });
+    } else {
+      // Create new
+      agent = await dbService.createAgent(userId, {
+        customName: cleanSlug,
+        displayName: displayName || cleanSlug,
+        description: description || '',
+        avatar: avatar || 'ꫧ',
+        modelId: modelId || 'gemini-2.5-flash',
+        gender: gender || 'neutral',
+        systemPrompt: systemPrompt || '',
+        effortLevel: effortLevel || 'auto',
+        skills: Array.isArray(skills) ? skills : ['code_execution', 'file_generation'],
+        themeColor: themeColor || '#8b5cf6',
+        themePreset: themePreset || 'winter_midnight',
+        themeMode: themeMode || 'dark',
+        allowsFileUploads: Boolean(allowsFileUploads),
+        embedEnabled: embedEnabled !== false,
+      });
+    }
+
+    res.json({ success: true, agent });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to publish conversation' });
+  }
+});
+
+app.post('/api/conversations/unpublish', async (req: Request, res: Response) => {
+  try {
+    const { customName, agentId } = req.body;
+    let target = null;
+    if (customName) {
+      target = await dbService.getAgentByCustomName(customName);
+    } else if (agentId) {
+      target = (await dbService.getAgentsByUserId('any')).find((a) => a.id === agentId);
+    }
+
+    if (target) {
+      await dbService.deleteAgent(target.id, target.userId);
+    }
+    res.json({ success: true, message: 'Agent unpublished successfully' });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to unpublish agent' });
+  }
+});
+
+// -----------------------------------------------------------------------------
 // PUBLIC VISITOR AGENT ROUTES (NO AUTH REQUIRED)
 // -----------------------------------------------------------------------------
 
@@ -266,6 +413,7 @@ app.get('/api/public/agents/:customName', async (req: Request, res: Response) =>
         avatar: agent.avatar,
         modelId: agent.modelId,
         gender: agent.gender,
+        systemPrompt: agent.systemPrompt,
         effortLevel: agent.effortLevel,
         skills: agent.skills,
         themeColor: agent.themeColor,
@@ -278,6 +426,146 @@ app.get('/api/public/agents/:customName', async (req: Request, res: Response) =>
         embedEnabled: agent.embedEnabled,
         owner: agent.owner,
       },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Public status endpoint: pings API key validity or Ollama server availability
+app.get('/api/public/agents/:customName/status', async (req: Request, res: Response) => {
+  try {
+    const { customName } = req.params;
+    const agent = await dbService.getAgentByCustomName(customName);
+    if (!agent) {
+      return res.status(404).json({ error: `Agent "${customName}" not found.` });
+    }
+
+    const targetModel = agent.modelId || 'gemini-2.5-flash';
+    const lowerModel = targetModel.toLowerCase();
+
+    // 1. Browser-based local models (handled in browser)
+    const isBrowserModel =
+      lowerModel.includes('onnx') ||
+      lowerModel.includes('smollm') ||
+      lowerModel.includes('xenova') ||
+      lowerModel.startsWith('local') ||
+      (lowerModel.includes('qwen') && (lowerModel.includes('0.5b') || lowerModel.includes('1.5b') || lowerModel.includes('instruct-onnx')));
+
+    if (isBrowserModel) {
+      return res.json({
+        type: 'browser',
+        modelId: targetModel,
+      });
+    }
+
+    // 2. Load owner's configured credentials
+    const owner = await dbService.getUserById(agent.userId);
+    const ownerApiKeys = owner?.apiKeys || {};
+
+    const timeoutMs = 3500;
+
+    // Helper: fetch with timeout
+    const pingEndpoint = async (url: string, options: RequestInit = {}): Promise<boolean> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timer);
+        return res.ok;
+      } catch {
+        clearTimeout(timer);
+        return false;
+      }
+    };
+
+    // 3. Ollama model -> ping Ollama server
+    if (lowerModel.startsWith('ollama') || lowerModel.includes('ollama:')) {
+      const rawOllamaModel = targetModel.includes(':') ? targetModel.split(':')[1] : targetModel.replace('ollama/', '');
+      const ollamaUrl = (ownerApiKeys.ollama_url || 'http://localhost:11434').replace(/\/+$/, '');
+
+      let isUp = await pingEndpoint(`${ollamaUrl}/api/version`, {
+        headers: { 'ngrok-skip-browser-warning': 'true' },
+      });
+      if (!isUp) {
+        isUp = await pingEndpoint(`${ollamaUrl}/api/tags`, {
+          headers: { 'ngrok-skip-browser-warning': 'true' },
+        });
+      }
+
+      return res.json({
+        type: 'ollama',
+        active: isUp,
+        status: isUp ? 'Active' : 'Offline',
+        modelId: rawOllamaModel,
+      });
+    }
+
+    // 4. API Key dependent models -> ping their respective API endpoints
+    let isActive = false;
+
+    if (lowerModel.includes('claude')) {
+      const key = ownerApiKeys.claude;
+      if (key) {
+        isActive = await pingEndpoint('https://api.anthropic.com/v1/models', {
+          headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+        });
+      }
+    } else if (lowerModel.includes('gpt') || lowerModel.includes('o1') || lowerModel.includes('o3') || lowerModel.includes('openai')) {
+      const key = ownerApiKeys.openai;
+      if (key) {
+        isActive = await pingEndpoint('https://api.openai.com/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } else if (lowerModel.includes('groq') || (lowerModel.includes('llama') && !lowerModel.includes('ollama'))) {
+      const key = ownerApiKeys.groq;
+      if (key) {
+        isActive = await pingEndpoint('https://api.groq.com/openai/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } else if (lowerModel.includes('deepseek')) {
+      const key = ownerApiKeys.deepseek;
+      if (key) {
+        isActive = await pingEndpoint('https://api.deepseek.com/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } else if (lowerModel.includes('grok')) {
+      const key = ownerApiKeys.grok;
+      if (key) {
+        isActive = await pingEndpoint('https://api.x.ai/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } else if (lowerModel.includes('zai') || lowerModel.includes('glm')) {
+      const key = ownerApiKeys.zai;
+      if (key) {
+        isActive = await pingEndpoint('https://open.bigmodel.cn/api/paas/v4/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } else if (lowerModel.includes('qwen')) {
+      const key = ownerApiKeys.qwen;
+      if (key) {
+        isActive = await pingEndpoint('https://dashscope.aliyuncs.com/compatible-mode/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } else {
+      // Default / Gemini
+      const key = ownerApiKeys.gemini || process.env.GEMINI_API_KEY;
+      if (key) {
+        isActive = await pingEndpoint(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${key}`);
+      }
+    }
+
+    return res.json({
+      type: 'api',
+      active: isActive,
+      status: isActive ? 'Active' : 'Offline',
+      error: isActive ? undefined : 'API key invalid, missing or server unreachable',
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -328,6 +616,22 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
 
     const targetModel = agent.modelId || 'gemini-2.5-flash';
     const lowerModel = targetModel.toLowerCase();
+
+    // 0. Browser-based local models (run client-side via Transformers.js in the browser)
+    const isBrowserModel =
+      lowerModel.includes('onnx') ||
+      lowerModel.includes('smollm') ||
+      lowerModel.includes('xenova') ||
+      lowerModel.startsWith('local') ||
+      (lowerModel.includes('qwen') && (lowerModel.includes('0.5b') || lowerModel.includes('1.5b') || lowerModel.includes('instruct-onnx')));
+
+    if (isBrowserModel) {
+      return res.json({
+        response: `This assistant is running the client-side language model (${targetModel}) directly inside your browser.`,
+        isBrowserModel: true,
+        timestamp: Date.now(),
+      });
+    }
 
     // 1. Anthropic Claude
     if (lowerModel.includes('claude') && ownerApiKeys.claude) {
@@ -412,8 +716,39 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
         responseText = `[Groq error: ${err.message}]`;
       }
     }
-    // 4. Gemini (or default)
-    else {
+    // 4. Ollama
+    else if (lowerModel.startsWith('ollama') || lowerModel.includes('ollama:')) {
+      const rawOllamaModel = targetModel.includes(':') ? targetModel.split(':')[1] : targetModel.replace('ollama/', '');
+      const ollamaUrl = (ownerApiKeys.ollama_url || 'http://localhost:11434').replace(/\/+$/, '');
+      try {
+        const ollamaRes = await fetch(`${ollamaUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true',
+          },
+          body: JSON.stringify({
+            model: rawOllamaModel || 'llama3.2',
+            messages: [
+              { role: 'system', content: systemInstruction },
+              ...priorTurns.map((t: any) => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text })),
+              { role: 'user', content: message + attachmentsText },
+            ],
+            temperature: 0.3,
+          }),
+        });
+        if (ollamaRes.ok) {
+          const odata = await ollamaRes.json();
+          responseText = odata.choices?.[0]?.message?.content || 'No response from Ollama.';
+        } else {
+          responseText = `[Ollama server responded with status ${ollamaRes.status} at ${ollamaUrl}]`;
+        }
+      } catch (ollamaErr: any) {
+        responseText = `[Unable to connect to Ollama server at ${ollamaUrl}: ${ollamaErr.message}]`;
+      }
+    }
+    // 5. Gemini
+    else if (lowerModel.includes('gemini') || !lowerModel.includes('/')) {
       const geminiKey = ownerApiKeys.gemini || process.env.GEMINI_API_KEY;
       if (geminiKey) {
         try {
@@ -440,8 +775,10 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
           responseText = `[Error generating response: ${geminiErr.message || String(geminiErr)}]`;
         }
       } else {
-        responseText = `Hello! I am ${agent.displayName}. My owner has configured me with the following directives:\n\n${agent.systemPrompt || 'General assistance.'}\n\nTo enable live inference for this agent, configure the appropriate API key in your account settings.`;
+        responseText = `Hello! I am ${agent.displayName}. My owner has configured me with the following directives:\n\n${agent.systemPrompt || 'General assistance.'}\n\nTo enable live cloud inference for this agent, configure the appropriate API key in your account settings.`;
       }
+    } else {
+      responseText = `Hello! I am ${agent.displayName}. This agent is configured with model "${targetModel}".`;
     }
 
     res.json({
@@ -450,6 +787,164 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Chat generation failed' });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// UNIFIED INFERENCE PROXY (/api/chat)
+// Re-uses credentials between internal and external environments
+// -----------------------------------------------------------------------------
+app.post('/api/chat', async (req: Request, res: Response) => {
+  try {
+    const { modelId, provider, messages, prompt, systemPrompt, temperature = 0.3, maxTokens = 2048, apiKey } = req.body;
+
+    let userKeys: Record<string, string> = {};
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const user = await dbService.getUserBySessionToken(token);
+      if (user?.apiKeys) {
+        userKeys = user.apiKeys;
+      }
+    }
+
+    const effectiveProvider = provider || (modelId?.includes(':') ? modelId.split(':')[0] : 'gemini');
+    const lowerModel = (modelId || 'gemini-2.5-flash').toLowerCase();
+
+    const formattedMessages = Array.isArray(messages) && messages.length > 0
+      ? messages
+      : [{ role: 'user', content: prompt || '' }];
+
+    let responseText = '';
+
+    // 1. Gemini
+    if (effectiveProvider === 'gemini' || lowerModel.includes('gemini')) {
+      const key = apiKey || userKeys.gemini || process.env.GEMINI_API_KEY;
+      if (!key) {
+        return res.status(400).json({ error: 'Gemini API key is not configured.' });
+      }
+      const ai = new GoogleGenAI({ apiKey: key });
+      const contents: any[] = [];
+      for (const m of formattedMessages) {
+        contents.push({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
+        });
+      }
+      const result = await ai.models.generateContent({
+        model: modelId?.includes(':') ? modelId.split(':')[1] : (modelId || 'gemini-2.5-flash'),
+        contents,
+        config: {
+          systemInstruction: systemPrompt || undefined,
+          temperature,
+        },
+      });
+      responseText = result.text || '';
+    }
+    // 2. Claude
+    else if (effectiveProvider === 'claude' || lowerModel.includes('claude')) {
+      const key = apiKey || userKeys.claude || process.env.ANTHROPIC_API_KEY;
+      if (!key) {
+        return res.status(400).json({ error: 'Anthropic Claude API key is not configured.' });
+      }
+      const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: modelId?.includes(':') ? modelId.split(':')[1] : 'claude-3-5-sonnet-20241022',
+          system: systemPrompt || undefined,
+          messages: formattedMessages.map((m: any) => ({
+            role: m.role === 'assistant' ? 'assistant' : 'user',
+            content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          })),
+          max_tokens: maxTokens,
+        }),
+      });
+      const cdata = await claudeRes.json();
+      responseText = cdata.content?.[0]?.text || '';
+    }
+    // 3. OpenAI
+    else if (effectiveProvider === 'openai' || lowerModel.includes('gpt') || lowerModel.includes('o1') || lowerModel.includes('o3')) {
+      const key = apiKey || userKeys.openai || process.env.OPENAI_API_KEY;
+      if (!key) {
+        return res.status(400).json({ error: 'OpenAI API key is not configured.' });
+      }
+      const fetchRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: modelId?.includes(':') ? modelId.split(':')[1] : 'gpt-4o',
+          messages: [
+            ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+            ...formattedMessages.map((m: any) => ({ role: m.role, content: m.content })),
+          ],
+          temperature,
+        }),
+      });
+      const data = await fetchRes.json();
+      responseText = data.choices?.[0]?.message?.content || '';
+    }
+    // 4. Groq
+    else if (effectiveProvider === 'groq' || lowerModel.includes('groq')) {
+      const key = apiKey || userKeys.groq || process.env.GROQ_API_KEY;
+      if (!key) {
+        return res.status(400).json({ error: 'Groq API key is not configured.' });
+      }
+      const fetchRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: modelId?.includes(':') ? modelId.split(':')[1] : 'llama-3.3-70b-versatile',
+          messages: [
+            ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+            ...formattedMessages.map((m: any) => ({ role: m.role, content: m.content })),
+          ],
+          temperature,
+        }),
+      });
+      const data = await fetchRes.json();
+      responseText = data.choices?.[0]?.message?.content || '';
+    }
+    // 5. DeepSeek
+    else if (effectiveProvider === 'deepseek' || lowerModel.includes('deepseek')) {
+      const key = apiKey || userKeys.deepseek || process.env.DEEPSEEK_API_KEY;
+      if (!key) {
+        return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+      }
+      const fetchRes = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: modelId?.includes(':') ? modelId.split(':')[1] : 'deepseek-chat',
+          messages: [
+            ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+            ...formattedMessages.map((m: any) => ({ role: m.role, content: m.content })),
+          ],
+          temperature,
+        }),
+      });
+      const data = await fetchRes.json();
+      responseText = data.choices?.[0]?.message?.content || '';
+    } else {
+      return res.status(400).json({ error: `Provider "${effectiveProvider}" is not supported.` });
+    }
+
+    res.json({ response: responseText, timestamp: Date.now() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server inference failed' });
   }
 });
 

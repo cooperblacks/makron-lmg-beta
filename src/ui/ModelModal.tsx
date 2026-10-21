@@ -6,7 +6,9 @@ import {
   EyeOff,
   Globe,
   Key,
+  Loader2,
   Plus,
+  RefreshCw,
   Server,
   Sparkles,
   X,
@@ -61,9 +63,54 @@ export const ModelModal: React.FC<ModelModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState(hfToken);
   const [showKeyMap, setShowKeyMap] = useState<Record<string, boolean>>({});
+  const [ollamaPingState, setOllamaPingState] = useState<'idle' | 'pinging' | 'connected' | 'error'>('idle');
+  const [ollamaError, setOllamaError] = useState<string | null>(null);
 
   const manager = ModelManager.getInstance();
   const hasWebGpu = manager.getHasWebGpu();
+
+  const pingOllamaServer = async (testUrl?: string) => {
+    const rawUrl = (testUrl !== undefined ? testUrl : ollamaUrl)?.trim() || 'http://localhost:11434';
+    const baseUrl = rawUrl.replace(/\/+$/, '');
+    setOllamaPingState('pinging');
+    setOllamaError(null);
+
+    // 1. Direct browser ping
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${baseUrl}/api/version`, {
+        method: 'GET',
+        headers: { 'ngrok-skip-browser-warning': 'true' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        setOllamaPingState('connected');
+        return true;
+      }
+    } catch {
+      // Direct ping failed or blocked by CORS / mixed content; try backend proxy
+    }
+
+    // 2. Server proxy ping
+    try {
+      const res = await fetch(`/api/ping-ollama?url=${encodeURIComponent(baseUrl)}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setOllamaPingState('connected');
+        return true;
+      } else {
+        setOllamaPingState('error');
+        setOllamaError(data.error || 'Server unreachable');
+        return false;
+      }
+    } catch (err: any) {
+      setOllamaPingState('error');
+      setOllamaError(err.message || 'Server ping failed');
+      return false;
+    }
+  };
 
   useEffect(() => {
     setTokenInput(hfToken);
@@ -88,6 +135,15 @@ export const ModelModal: React.FC<ModelModalProps> = ({
     });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      const details = resolveModelDetails(selectedModelId, vendorModels);
+      if (details.provider === 'ollama') {
+        pingOllamaServer();
+      }
+    }
+  }, [isOpen, selectedModelId, ollamaUrl]);
 
   if (!isOpen) return null;
 
@@ -377,16 +433,38 @@ export const ModelModal: React.FC<ModelModalProps> = ({
 
                 <div className="flex items-center gap-2">
                   {currentDetails.provider === 'ollama' ? (
-                    <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Active</span>
-                    </span>
+                    ollamaPingState === 'pinging' ? (
+                      <span className="flex items-center gap-1.5 text-[11px] font-mono text-neutral-500 bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-700">
+                        <Loader2 className="w-3 h-3 animate-spin text-neutral-400" />
+                        <span>Pinging...</span>
+                      </span>
+                    ) : ollamaPingState === 'connected' ? (
+                      <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Active</span>
+                      </span>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800 font-medium">
+                          Offline / Unreachable
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => pingOllamaServer()}
+                          title="Retry pinging Ollama server"
+                          className="p-1 rounded bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 cursor-pointer"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )
                   ) : (
                     <button
                       type="button"
                       onClick={() => {
                         const activeModel = vendorModels['ollama'] || 'llama3.2';
                         onSelectModel(`ollama:${activeModel}`);
+                        pingOllamaServer();
                       }}
                       className="px-2.5 py-1 text-xs font-medium rounded bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 transition-opacity cursor-pointer"
                     >
@@ -397,16 +475,26 @@ export const ModelModal: React.FC<ModelModalProps> = ({
               </div>
 
               <p className="text-[11px] text-neutral-500 leading-relaxed mb-3">
-                Connect directly to an Ollama server running locally or tunneled securely via Ngrok.
+                Connect directly to an Ollama server running locally or tunneled securely via Ngrok. Status shows Active only when the server is reachable.
               </p>
 
               {/* Form Fields: Ngrok URL & Model Identifier */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
                 {/* 1. Ngrok / Server URL */}
                 <div>
-                  <label className="block text-[10px] font-mono text-neutral-500 mb-1">
-                    Ollama Server / Ngrok URL
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[10px] font-mono text-neutral-500">
+                      Ollama Server / Ngrok URL
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => pingOllamaServer()}
+                      className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <RefreshCw className="w-2.5 h-2.5" />
+                      <span>Test Connection</span>
+                    </button>
+                  </div>
                   <input
                     type="text"
                     value={ollamaUrl}
@@ -418,6 +506,11 @@ export const ModelModal: React.FC<ModelModalProps> = ({
                     placeholder="https://xxxx-xx-xx.ngrok-free.app"
                     className="w-full px-2.5 py-1.5 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded text-xs font-mono text-neutral-900 dark:text-neutral-100 outline-hidden focus:border-neutral-500"
                   />
+                  {ollamaError && currentDetails.provider === 'ollama' && (
+                    <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+                      {ollamaError}
+                    </p>
+                  )}
                 </div>
 
                 {/* 2. Model Identifier */}

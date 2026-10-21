@@ -490,14 +490,11 @@ export default function App() {
         <Header
           conversation={activeConv}
           onOpenSidebar={() => setIsSidebarOpen(true)}
-          onOpenContext={() => setIsContextModalOpen(true)}
           onOpenWorkspace={() => {
             setPreviewFilePath(null);
             setIsWorkspaceOpen(true);
           }}
-          onOpenModels={() => setIsModelModalOpen(true)}
           onOpenSettings={() => setIsSettingsModalOpen(true)}
-          onSelectModel={handleSelectModel}
           onRenameConversation={handleRenameConversation}
           theme={settings.theme}
           onToggleTheme={handleToggleTheme}

@@ -5,6 +5,20 @@ export interface Conversation {
   updatedAt: number;
   systemPrompt?: string;
   modelId: string;
+  // Custom Agent & Published Frontend derivative fields
+  isPublished?: boolean;
+  publishedSlug?: string;
+  publishedAgentId?: string;
+  avatar?: string; // Mini-sized avatar for custom agents (emoji or base64 data URL)
+  themePreset?: AgentThemePreset;
+  themeColor?: string;
+  themeMode?: 'light' | 'dark';
+  description?: string;
+  gender?: 'male' | 'female' | 'neutral';
+  skills?: string[];
+  effortLevel?: ReasoningLevel;
+  allowsFileUploads?: boolean;
+  embedEnabled?: boolean;
 }
 
 export interface AttachedFile {

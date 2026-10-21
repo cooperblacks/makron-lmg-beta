@@ -9,6 +9,52 @@ interface AvatarCropperModalProps {
   initialImage?: string;
 }
 
+interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+function normalizeImage(
+  dataUrl: string,
+  maxDimension = 600
+): Promise<{ normalizedUrl: string; width: number; height: number }> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      let w = img.naturalWidth || img.width || 300;
+      let h = img.naturalHeight || img.height || 300;
+
+      // Downscale proportionally if larger than standard max dimension
+      if (w > maxDimension || h > maxDimension) {
+        if (w > h) {
+          h = Math.round((h * maxDimension) / w);
+          w = maxDimension;
+        } else {
+          w = Math.round((w * maxDimension) / h);
+          h = maxDimension;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, w, h);
+        const normalizedUrl = canvas.toDataURL('image/jpeg', 0.9);
+        resolve({ normalizedUrl, width: w, height: h });
+      } else {
+        resolve({ normalizedUrl: dataUrl, width: w, height: h });
+      }
+    };
+    img.onerror = () => {
+      resolve({ normalizedUrl: dataUrl, width: 200, height: 200 });
+    };
+    img.src = dataUrl;
+  });
+}
+
 export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
   isOpen,
   onClose,
@@ -16,21 +62,32 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
   title = 'Crop & Resize Avatar',
   initialImage,
 }) => {
-  const [imageSrc, setImageSrc] = useState<string | null>(initialImage || null);
+  const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [imgDim, setImgDim] = useState<ImageDimensions>({ width: 200, height: 200 });
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [isNormalizing, setIsNormalizing] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const VIEWPORT_SIZE = 200;
+  const OUTPUT_SIZE = 256;
 
   useEffect(() => {
-    if (initialImage) {
-      setImageSrc(initialImage);
+    if (initialImage && isOpen) {
+      setIsNormalizing(true);
+      normalizeImage(initialImage).then(({ normalizedUrl, width, height }) => {
+        setImageSrc(normalizedUrl);
+        setImgDim({ width, height });
+        setZoom(1);
+        setOffset({ x: 0, y: 0 });
+        setIsNormalizing(false);
+      });
     }
-  }, [initialImage]);
+  }, [initialImage, isOpen]);
 
   if (!isOpen) return null;
 
@@ -38,11 +95,16 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setIsNormalizing(true);
     const reader = new FileReader();
-    reader.onload = (event) => {
-      setImageSrc(event.target?.result as string);
+    reader.onload = async (event) => {
+      const rawDataUrl = event.target?.result as string;
+      const { normalizedUrl, width, height } = await normalizeImage(rawDataUrl);
+      setImageSrc(normalizedUrl);
+      setImgDim({ width, height });
       setZoom(1);
       setOffset({ x: 0, y: 0 });
+      setIsNormalizing(false);
     };
     reader.readAsDataURL(file);
   };
@@ -65,35 +127,39 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
     setIsDragging(false);
   };
 
+  // Base scale fits the normalized image within the 200px viewport circle at zoom = 1
+  const maxDim = Math.max(imgDim.width, imgDim.height) || 200;
+  const baseScale = VIEWPORT_SIZE / maxDim;
+
+  const currentDisplayWidth = imgDim.width * baseScale * zoom;
+  const currentDisplayHeight = imgDim.height * baseScale * zoom;
+
   const handleConfirmCrop = () => {
     if (!imageSrc || !imgRef.current) return;
 
     const canvas = document.createElement('canvas');
-    const OUTPUT_SIZE = 256;
     canvas.width = OUTPUT_SIZE;
     canvas.height = OUTPUT_SIZE;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Viewport is 200x200 px
-    const VIEWPORT_SIZE = 200;
-    const img = imgRef.current;
+    // Scale factor from 200px viewport to 256px output canvas
+    const scale = OUTPUT_SIZE / VIEWPORT_SIZE;
 
     // Background circle clip
+    ctx.save();
     ctx.beginPath();
     ctx.arc(OUTPUT_SIZE / 2, OUTPUT_SIZE / 2, OUTPUT_SIZE / 2, 0, Math.PI * 2);
     ctx.closePath();
     ctx.clip();
 
-    // Scale factor from viewport to output canvas
-    const scale = OUTPUT_SIZE / VIEWPORT_SIZE;
+    // Map exact display coordinates from viewport onto output canvas
+    const destW = currentDisplayWidth * scale;
+    const destH = currentDisplayHeight * scale;
+    const destX = OUTPUT_SIZE / 2 + offset.x * scale - destW / 2;
+    const destY = OUTPUT_SIZE / 2 + offset.y * scale - destH / 2;
 
-    ctx.save();
-    ctx.translate(OUTPUT_SIZE / 2, OUTPUT_SIZE / 2);
-    ctx.scale(scale * zoom, scale * zoom);
-    ctx.translate(-img.naturalWidth / 2 + offset.x / zoom, -img.naturalHeight / 2 + offset.y / zoom);
-
-    ctx.drawImage(img, 0, 0);
+    ctx.drawImage(imgRef.current, destX, destY, destW, destH);
     ctx.restore();
 
     const base64 = canvas.toDataURL('image/jpeg', 0.88);
@@ -116,7 +182,7 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
           {title}
         </h3>
         <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4">
-          Upload an image, drag to position, and use the zoom slider to frame your avatar.
+          Images are normalized to standard size. Drag to position and zoom out or in to frame your avatar.
         </p>
 
         {/* Viewport Frame */}
@@ -127,15 +193,22 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
         >
-          {imageSrc ? (
+          {isNormalizing ? (
+            <div className="text-center p-4 text-neutral-400 text-xs">
+              <span>Optimizing image...</span>
+            </div>
+          ) : imageSrc ? (
             <img
               ref={imgRef}
               src={imageSrc}
               alt="Avatar preview"
               draggable={false}
-              className="max-w-none pointer-events-none transition-transform duration-75"
+              className="pointer-events-none select-none"
               style={{
-                transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+                width: `${currentDisplayWidth}px`,
+                height: `${currentDisplayHeight}px`,
+                transform: `translate(${offset.x}px, ${offset.y}px)`,
+                maxWidth: 'none',
               }}
             />
           ) : (
@@ -147,21 +220,39 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
         </div>
 
         {/* Zoom & Adjustment Controls */}
-        {imageSrc && (
+        {imageSrc && !isNormalizing && (
           <div className="mt-4 space-y-2">
             <div className="flex items-center justify-between text-xs text-neutral-500">
               <span className="flex items-center gap-1 text-[11px]">
                 <ZoomOut className="w-3.5 h-3.5" />
-                <span>Zoom</span>
+                <span>Zoom Level</span>
               </span>
-              <span className="font-mono text-[10px]">{zoom.toFixed(1)}x</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setZoom((prev) => Math.max(0.2, Number((prev - 0.2).toFixed(2))))}
+                  title="Zoom Out"
+                  className="px-1.5 py-0.5 rounded text-[10px] bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 cursor-pointer"
+                >
+                  -
+                </button>
+                <span className="font-mono text-[10px] w-10 text-center">{zoom.toFixed(2)}x</span>
+                <button
+                  type="button"
+                  onClick={() => setZoom((prev) => Math.min(4, Number((prev + 0.2).toFixed(2))))}
+                  title="Zoom In"
+                  className="px-1.5 py-0.5 rounded text-[10px] bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 cursor-pointer"
+                >
+                  +
+                </button>
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <input
                 type="range"
-                min="0.8"
-                max="3"
-                step="0.05"
+                min="0.2"
+                max="4"
+                step="0.02"
                 value={zoom}
                 onChange={(e) => setZoom(parseFloat(e.target.value))}
                 className="w-full h-1 bg-neutral-200 dark:bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-600"
@@ -172,8 +263,8 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
                   setZoom(1);
                   setOffset({ x: 0, y: 0 });
                 }}
-                title="Reset position"
-                className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded"
+                title="Reset zoom & position"
+                className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
@@ -181,7 +272,7 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
           </div>
         )}
 
-        {/* File Selector */}
+        {/* File Selector & Action Buttons */}
         <div className="mt-4 flex items-center justify-between gap-2">
           <button
             type="button"
@@ -201,7 +292,7 @@ export const AvatarCropperModal: React.FC<AvatarCropperModalProps> = ({
 
           <button
             type="button"
-            disabled={!imageSrc}
+            disabled={!imageSrc || isNormalizing}
             onClick={handleConfirmCrop}
             className="flex-1 py-1.5 px-3 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-semibold transition cursor-pointer shadow-xs"
           >
