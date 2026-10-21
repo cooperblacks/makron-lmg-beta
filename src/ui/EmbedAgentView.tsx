@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { PublicAgentOwner, VerifiedType } from '../types';
+import { modelManager, resolveModelDetails } from '../models/manager';
 import { GUARANTEED_FEMALE_VOICES, GUARANTEED_MALE_VOICES } from './PublishedAgentView';
 import { VerifiedBadge } from './VerifiedBadge';
 
@@ -29,6 +30,7 @@ interface PublicAgent {
   avatar: string;
   modelId?: string;
   gender?: 'male' | 'female' | 'neutral';
+  systemPrompt?: string;
   effortLevel: string;
   skills: string[];
   themeColor: string;
@@ -162,6 +164,95 @@ export const EmbedAgentView: React.FC<EmbedAgentViewProps> = ({ customName }) =>
     window.speechSynthesis.speak(utterance);
   };
 
+  const [modelLoadingText, setModelLoadingText] = useState<string | null>(null);
+  const [agentStatus, setAgentStatus] = useState<'Active' | 'Idle' | 'Offline' | 'Checking'>('Checking');
+
+  useEffect(() => {
+    const unsub = modelManager.onProgress((p) => {
+      if (p.status === 'progress' && p.progress < 100) {
+        setModelLoadingText(`Loading model: ${p.progress}%`);
+      } else if (p.status === 'ready' || p.status === 'done') {
+        setModelLoadingText(null);
+        setAgentStatus('Active');
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!agent) return;
+    let isMounted = true;
+
+    const checkStatus = async () => {
+      const targetModel = agent.modelId || 'gemini-2.5-flash';
+      const modelDetails = resolveModelDetails(targetModel);
+
+      // 1. Browser-based local models
+      if (modelDetails.isLocal) {
+        if (modelManager.getIsLoaded() && modelManager.getCurrentModelId() === modelDetails.id) {
+          if (isMounted) setAgentStatus('Active');
+          return;
+        }
+
+        let foundInStorage = false;
+        if (typeof window !== 'undefined') {
+          if ('caches' in window) {
+            try {
+              const cacheKeys = await window.caches.keys();
+              const modelKeyFragment = (modelDetails.id.split('/').pop() || modelDetails.id).toLowerCase();
+              for (const key of cacheKeys) {
+                if (key.includes('transformers') || key.includes('onnx') || key.includes('huggingface')) {
+                  const cache = await window.caches.open(key);
+                  const requests = await cache.keys();
+                  if (requests.some((r) => r.url.toLowerCase().includes(modelKeyFragment))) {
+                    foundInStorage = true;
+                    break;
+                  }
+                }
+              }
+            } catch {}
+          }
+          if (!foundInStorage && 'indexedDB' in window && typeof indexedDB.databases === 'function') {
+            try {
+              const dbs = await indexedDB.databases();
+              if (dbs.some((d) => d.name && (d.name.includes('transformers') || d.name.includes('onnx')))) {
+                foundInStorage = true;
+              }
+            } catch {}
+          }
+        }
+
+        if (isMounted) {
+          setAgentStatus(foundInStorage ? 'Active' : 'Idle');
+        }
+        return;
+      }
+
+      // 2. API or Ollama model
+      try {
+        const res = await fetch(`/api/public/agents/${encodeURIComponent(customName)}/status`);
+        if (!isMounted) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (data.type === 'browser') {
+            setAgentStatus(modelManager.getIsLoaded() ? 'Active' : 'Idle');
+          } else {
+            setAgentStatus(data.active ? 'Active' : 'Offline');
+          }
+        } else {
+          setAgentStatus('Offline');
+        }
+      } catch {
+        if (isMounted) setAgentStatus('Offline');
+      }
+    };
+
+    checkStatus();
+    return () => {
+      isMounted = false;
+    };
+  }, [agent, customName]);
+
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if ((!input.trim() && attachedFiles.length === 0) || sending || !agent) return;
@@ -189,33 +280,86 @@ export const EmbedAgentView: React.FC<EmbedAgentViewProps> = ({ customName }) =>
     setSending(true);
 
     try {
-      const history = nextMessages
-        .filter((m) => m.id !== 'welcome')
-        .slice(-10)
-        .map((m) => ({ role: m.role, content: m.content }));
+      const modelDetails = resolveModelDetails(agent.modelId || '');
+      const isLocalModel = modelDetails.isLocal;
 
-      const res = await fetch(`/api/public/agents/${encodeURIComponent(customName)}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: userText || 'Please inspect the attached documents.',
-          history,
-          attachments: currentFiles,
-        }),
-      });
+      if (isLocalModel) {
+        if (!modelManager.getIsLoaded() || modelManager.getCurrentModelId() !== modelDetails.id) {
+          setModelLoadingText(`Loading ${modelDetails.name}...`);
+          await modelManager.loadModel(modelDetails.id, 'webgpu');
+          setModelLoadingText(null);
+        }
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Chat request failed');
+        const effortInstruction =
+          agent.effortLevel === 'low'
+            ? 'Provide direct, concise, immediate answers without preamble.'
+            : agent.effortLevel === 'high' || agent.effortLevel === 'max'
+            ? 'Provide comprehensive, thoroughly analyzed and structured multi-step solutions with detailed code or operational blueprints where appropriate.'
+            : 'Provide balanced, well-reasoned, actionable assistance.';
+
+        const systemInstruction = `You are "${agent.displayName}", an AI assistant.\n${agent.description ? `Description: ${agent.description}\n` : ''}${agent.systemPrompt ? `Context & Directives:\n${agent.systemPrompt}\n` : ''}\nEffort & Reasoning Policy: ${effortInstruction}`;
+
+        const history = nextMessages
+          .filter((m) => m.id !== 'welcome')
+          .slice(-10)
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        let attachmentsText = '';
+        if (agent.allowsFileUploads && currentFiles.length > 0) {
+          attachmentsText =
+            '\n\nAttached User Documents:\n' +
+            currentFiles.map((a: any) => `[File: ${a.name}]\n${a.content || ''}`).join('\n\n');
+        }
+
+        const messagesPayload = [
+          { role: 'system', content: systemInstruction },
+          ...history,
+          { role: 'user', content: (userText || 'Please inspect attached documents') + attachmentsText },
+        ];
+
+        const generatedText = await modelManager.generate({
+          modelId: modelDetails.id,
+          messages: messagesPayload,
+          maxNewTokens: 1024,
+          temperature: agent.effortLevel === 'low' ? 0.2 : 0.6,
+        });
+
+        const botMsg: ChatMessage = {
+          id: 'bot_' + Date.now(),
+          role: 'assistant',
+          content: generatedText || 'I have completed your request.',
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, botMsg]);
+      } else {
+        const history = nextMessages
+          .filter((m) => m.id !== 'welcome')
+          .slice(-10)
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        const res = await fetch(`/api/public/agents/${encodeURIComponent(customName)}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: userText || 'Please inspect the attached documents.',
+            history,
+            attachments: currentFiles,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Chat request failed');
+        }
+
+        const botMsg: ChatMessage = {
+          id: 'bot_' + Date.now(),
+          role: 'assistant',
+          content: data.response || 'No response returned.',
+          timestamp: data.timestamp || Date.now(),
+        };
+        setMessages((prev) => [...prev, botMsg]);
       }
-
-      const botMsg: ChatMessage = {
-        id: 'bot_' + Date.now(),
-        role: 'assistant',
-        content: data.response || 'No response returned.',
-        timestamp: data.timestamp || Date.now(),
-      };
-      setMessages((prev) => [...prev, botMsg]);
     } catch (err: any) {
       setMessages((prev) => [
         ...prev,
@@ -227,6 +371,7 @@ export const EmbedAgentView: React.FC<EmbedAgentViewProps> = ({ customName }) =>
         },
       ]);
     } finally {
+      setModelLoadingText(null);
       setSending(false);
     }
   };
@@ -304,10 +449,30 @@ export const EmbedAgentView: React.FC<EmbedAgentViewProps> = ({ customName }) =>
           </div>
           <div className="min-w-0">
             <h1 className="text-xs font-semibold truncate leading-tight">{agent.displayName}</h1>
-            <span className="text-[9px] text-emerald-500 font-mono flex items-center gap-1">
-              <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
-              Online
-            </span>
+            {agentStatus === 'Active' && (
+              <span className="text-[9px] text-emerald-500 font-mono flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
+                Active
+              </span>
+            )}
+            {agentStatus === 'Idle' && (
+              <span className="text-[9px] text-amber-500 dark:text-amber-400 font-mono flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-amber-400" />
+                Idle
+              </span>
+            )}
+            {agentStatus === 'Offline' && (
+              <span className="text-[9px] text-neutral-400 dark:text-neutral-500 font-mono flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-neutral-400 dark:bg-neutral-600" />
+                Offline
+              </span>
+            )}
+            {agentStatus === 'Checking' && (
+              <span className="text-[9px] text-neutral-400 font-mono flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-neutral-400 animate-pulse" />
+                Checking...
+              </span>
+            )}
           </div>
         </div>
 
@@ -418,7 +583,7 @@ export const EmbedAgentView: React.FC<EmbedAgentViewProps> = ({ customName }) =>
               }}
             >
               <Loader2 className="w-3 h-3 animate-spin" />
-              <span className="opacity-70 text-[11px]">Thinking...</span>
+              <span className="opacity-70 text-[11px]">{modelLoadingText || 'Thinking...'}</span>
             </div>
           </div>
         )}

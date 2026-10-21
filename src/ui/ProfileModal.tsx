@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Camera, Check, Mail, Shield, User, X } from 'lucide-react';
-import { AuthUser, VerifiedType } from '../types';
+import { Camera, Check, Mail, User, X } from 'lucide-react';
+import { AuthUser } from '../types';
 import { AvatarCropperModal } from './AvatarCropperModal';
-import { VerifiedBadge } from './VerifiedBadge';
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -23,7 +22,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [avatar, setAvatar] = useState<string | null>(null);
-  const [verifiedType, setVerifiedType] = useState<VerifiedType>(null);
   const [isCropperOpen, setIsCropperOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,7 +33,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setUsername(user.username || user.email.split('@')[0] || '');
       setEmail(user.email || '');
       setAvatar(user.avatar || null);
-      setVerifiedType(user.verifiedType || null);
     }
   }, [user, isOpen]);
 
@@ -61,7 +58,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           username: username.trim().toLowerCase().replace(/[^a-z0-9_-]/g, ''),
           email: email.trim().toLowerCase(),
           avatar,
-          verifiedType,
         }),
       });
 
@@ -135,12 +131,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               </div>
 
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-semibold text-neutral-900 dark:text-neutral-100 truncate">
-                    {name || user.email.split('@')[0]}
-                  </span>
-                  <VerifiedBadge type={verifiedType} size="md" />
-                </div>
+                <span className="block text-xs font-semibold text-neutral-900 dark:text-neutral-100 truncate">
+                  {name || user.email.split('@')[0]}
+                </span>
                 <p className="text-[11px] text-neutral-500">
                   Click avatar to upload and crop
                 </p>
@@ -194,23 +187,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   className="w-full pl-8 pr-3 py-1.5 text-xs rounded bg-neutral-100 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100 focus:outline-hidden focus:ring-1 focus:ring-blue-500"
                 />
               </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-medium text-neutral-600 dark:text-neutral-400 mb-1">
-                Account Verification Type
-              </label>
-              <select
-                value={verifiedType || ''}
-                onChange={(e) => setVerifiedType((e.target.value as VerifiedType) || null)}
-                className="w-full px-2.5 py-1.5 text-xs rounded bg-neutral-100 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-neutral-900 dark:text-neutral-100"
-              >
-                <option value="">None (Standard User)</option>
-                <option value="paid">Premium Member (Golden Check)</option>
-                <option value="celeb">Verified Member (Blue Check)</option>
-                <option value="dev">Verified Developer (Purple Check)</option>
-                <option value="founder">Makron Founder (Green Check)</option>
-              </select>
             </div>
 
             <div className="pt-2 flex justify-end gap-2">

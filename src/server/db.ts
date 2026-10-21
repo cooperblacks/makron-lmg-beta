@@ -58,7 +58,7 @@ const sql = hasNeonDb ? neon(DB_URL) : null;
 export async function initDatabase() {
   if (sql) {
     try {
-      console.log('[NeonDB] Connecting and verifying schema...');
+      console.log('[NeonDB] Connecting and verifying schema structure...');
       await sql`
         CREATE TABLE IF NOT EXISTS users (
           id VARCHAR(64) PRIMARY KEY,
@@ -75,7 +75,7 @@ export async function initDatabase() {
         );
       `;
 
-      // Column migrations for users
+      // Column additions for users if missing
       try {
         await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(64);`;
         await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;`;
@@ -83,7 +83,9 @@ export async function initDatabase() {
         await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS session_token VARCHAR(128);`;
         await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(32) DEFAULT 'free';`;
         await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS api_keys TEXT;`;
-      } catch {}
+      } catch (colErr) {
+        console.warn('[NeonDB] Users column verify notice:', colErr);
+      }
 
       await sql`
         CREATE TABLE IF NOT EXISTS agents (
@@ -111,7 +113,7 @@ export async function initDatabase() {
         );
       `;
 
-      // Column migrations for agents
+      // Column additions for agents if missing
       try {
         await sql`ALTER TABLE agents ADD COLUMN IF NOT EXISTS model_id VARCHAR(128);`;
         await sql`ALTER TABLE agents ADD COLUMN IF NOT EXISTS gender VARCHAR(32) DEFAULT 'neutral';`;
@@ -121,9 +123,54 @@ export async function initDatabase() {
         await sql`ALTER TABLE agents ADD COLUMN IF NOT EXISTS theme_text VARCHAR(32);`;
         await sql`ALTER TABLE agents ADD COLUMN IF NOT EXISTS allows_file_uploads BOOLEAN DEFAULT false;`;
         await sql`ALTER TABLE agents ADD COLUMN IF NOT EXISTS embed_enabled BOOLEAN DEFAULT true;`;
-      } catch {}
+      } catch (colErr) {
+        console.warn('[NeonDB] Agents column verify notice:', colErr);
+      }
 
-      console.log('[NeonDB] Schema verified successfully.');
+      // Structure Integrity Check & Auto-Repair: ensure avatar, prompt, etc are TEXT, not VARCHAR(255)
+      try {
+        console.log('[NeonDB] Checking structure integrity for column lengths...');
+        await sql`ALTER TABLE agents ALTER COLUMN avatar TYPE TEXT;`;
+        await sql`ALTER TABLE agents ALTER COLUMN system_prompt TYPE TEXT;`;
+        await sql`ALTER TABLE agents ALTER COLUMN description TYPE TEXT;`;
+        await sql`ALTER TABLE agents ALTER COLUMN skills TYPE TEXT;`;
+        await sql`ALTER TABLE agents ALTER COLUMN display_name TYPE TEXT;`;
+        await sql`ALTER TABLE agents ALTER COLUMN model_id TYPE VARCHAR(255);`;
+
+        await sql`ALTER TABLE users ALTER COLUMN avatar TYPE TEXT;`;
+        await sql`ALTER TABLE users ALTER COLUMN api_keys TYPE TEXT;`;
+        console.log('[NeonDB] Structure integrity check passed: text columns verified as TEXT.');
+      } catch (alterErr) {
+        console.warn('[NeonDB] Column type alteration notice:', alterErr);
+      }
+
+      // Dynamic information_schema scan to guarantee no VARCHAR(255) remains on text fields
+      try {
+        const columns = await sql`
+          SELECT table_name as "tableName", column_name as "columnName", data_type as "dataType"
+          FROM information_schema.columns
+          WHERE table_name IN ('agents', 'users')
+            AND column_name IN ('avatar', 'system_prompt', 'description', 'skills', 'api_keys')
+        `;
+        for (const c of columns) {
+          if (c.dataType !== 'text') {
+            console.log(`[NeonDB] Migrating ${c.tableName}.${c.columnName} from ${c.dataType} to TEXT`);
+            if (c.tableName === 'agents') {
+              if (c.columnName === 'avatar') await sql`ALTER TABLE agents ALTER COLUMN avatar TYPE TEXT;`;
+              if (c.columnName === 'system_prompt') await sql`ALTER TABLE agents ALTER COLUMN system_prompt TYPE TEXT;`;
+              if (c.columnName === 'description') await sql`ALTER TABLE agents ALTER COLUMN description TYPE TEXT;`;
+              if (c.columnName === 'skills') await sql`ALTER TABLE agents ALTER COLUMN skills TYPE TEXT;`;
+            } else if (c.tableName === 'users') {
+              if (c.columnName === 'avatar') await sql`ALTER TABLE users ALTER COLUMN avatar TYPE TEXT;`;
+              if (c.columnName === 'api_keys') await sql`ALTER TABLE users ALTER COLUMN api_keys TYPE TEXT;`;
+            }
+          }
+        }
+      } catch (schemaErr) {
+        console.warn('[NeonDB] Information schema verification notice:', schemaErr);
+      }
+
+      console.log('[NeonDB] Schema and structure integrity verified successfully.');
     } catch (err) {
       console.warn('[NeonDB] Initialization error, falling back to local storage:', err);
     }
@@ -334,7 +381,8 @@ export const dbService = {
       username: updates.username !== undefined ? updates.username : existing.username,
       email: updates.email !== undefined ? updates.email.toLowerCase() : existing.email,
       avatar: updates.avatar !== undefined ? (updates.avatar || undefined) : existing.avatar,
-      verifiedType: updates.verifiedType !== undefined ? updates.verifiedType : existing.verifiedType,
+      // Verification type is managed exclusively by platform admins; users cannot self-assign
+      verifiedType: existing.verifiedType,
     };
 
     if (sql) {
@@ -344,8 +392,7 @@ export const dbService = {
             name = ${updatedUser.name || ''},
             username = ${updatedUser.username || ''},
             email = ${updatedUser.email},
-            avatar = ${updatedUser.avatar || null},
-            verified_type = ${updatedUser.verifiedType || null}
+            avatar = ${updatedUser.avatar || null}
           WHERE id = ${userId}
         `;
       } catch (err) {
@@ -399,6 +446,43 @@ export const dbService = {
     }
   },
 
+  async ensureGuestUser(userId: string = 'guest_user'): Promise<DbUser> {
+    const existing = await this.getUserById(userId);
+    if (existing) return existing;
+
+    const guestUser: DbUser = {
+      id: userId,
+      email: `${userId}@makron.local`,
+      passwordHash: '',
+      name: 'Workspace Creator',
+      username: 'creator',
+      avatar: 'ꫧ',
+      tier: 'free',
+      verifiedType: null,
+      apiKeys: {},
+      createdAt: Date.now(),
+    };
+
+    if (sql) {
+      try {
+        await sql`
+          INSERT INTO users (id, email, password_hash, name, username, avatar, tier, verified_type, api_keys, created_at)
+          VALUES (${guestUser.id}, ${guestUser.email}, ${guestUser.passwordHash}, ${guestUser.name || null}, ${guestUser.username || null}, ${guestUser.avatar || null}, ${guestUser.tier}, ${guestUser.verifiedType || null}, ${JSON.stringify(guestUser.apiKeys)}, ${guestUser.createdAt})
+          ON CONFLICT (id) DO NOTHING
+        `;
+      } catch (err) {
+        console.warn('Neon guest user creation notice:', err);
+      }
+    }
+
+    if (!localStore.users.some((u) => u.id === userId)) {
+      localStore.users.push(guestUser);
+      saveLocalStore();
+    }
+
+    return guestUser;
+  },
+
   // --- AGENTS ---
   async getAgentsByUserId(userId: string): Promise<CustomAgent[]> {
     if (sql) {
@@ -413,7 +497,7 @@ export const dbService = {
                  created_at as "createdAt", updated_at as "updatedAt"
           FROM agents WHERE user_id = ${userId} ORDER BY created_at DESC
         `;
-        return rows.map((r) => ({
+        const neonAgents = rows.map((r) => ({
           id: r.id,
           userId: r.userId,
           customName: r.customName,
@@ -436,6 +520,15 @@ export const dbService = {
           createdAt: Number(r.createdAt),
           updatedAt: Number(r.updatedAt),
         }));
+
+        // Merge with any localStore agents for this user that may have been created during temporary db issues
+        const neonIds = new Set(neonAgents.map((a) => a.id));
+        const neonSlugs = new Set(neonAgents.map((a) => a.customName.toLowerCase()));
+        const missingLocal = localStore.agents.filter(
+          (a) => a.userId === userId && !neonIds.has(a.id) && !neonSlugs.has(a.customName.toLowerCase())
+        );
+
+        return [...neonAgents, ...missingLocal];
       } catch (err) {
         console.warn('Neon get agents error:', err);
       }
@@ -660,9 +753,45 @@ export const dbService = {
             ${newAgent.createdAt}, ${newAgent.updatedAt}
           )
         `;
+        // Keep local mirror updated
+        localStore.agents = [newAgent, ...localStore.agents.filter((a) => a.id !== newAgent.id)];
+        saveLocalStore();
         return newAgent;
-      } catch (err) {
+      } catch (err: any) {
         console.warn('Neon create agent error:', err);
+        // If error is about character varying(255) / code 22001, auto-repair and retry immediately
+        if (String(err?.message || '').includes('character varying') || err?.code === '22001') {
+          try {
+            console.log('[NeonDB] Structure repair: modifying avatar and text columns to TEXT and retrying INSERT...');
+            await sql`ALTER TABLE agents ALTER COLUMN avatar TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN system_prompt TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN description TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN skills TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN display_name TYPE TEXT;`;
+
+            await sql`
+              INSERT INTO agents (
+                id, user_id, custom_name, display_name, description, avatar,
+                model_id, gender, system_prompt, effort_level, skills,
+                theme_color, theme_preset, theme_mode, theme_bg, theme_card, theme_text,
+                allows_file_uploads, embed_enabled, created_at, updated_at
+              ) VALUES (
+                ${newAgent.id}, ${newAgent.userId}, ${newAgent.customName}, ${newAgent.displayName},
+                ${newAgent.description}, ${newAgent.avatar}, ${newAgent.modelId}, ${newAgent.gender},
+                ${newAgent.systemPrompt}, ${newAgent.effortLevel}, ${JSON.stringify(newAgent.skills)},
+                ${newAgent.themeColor}, ${newAgent.themePreset}, ${newAgent.themeMode},
+                ${newAgent.themeBg || null}, ${newAgent.themeCard || null}, ${newAgent.themeText || null},
+                ${newAgent.allowsFileUploads}, ${newAgent.embedEnabled},
+                ${newAgent.createdAt}, ${newAgent.updatedAt}
+              )
+            `;
+            localStore.agents = [newAgent, ...localStore.agents.filter((a) => a.id !== newAgent.id)];
+            saveLocalStore();
+            return newAgent;
+          } catch (retryErr) {
+            console.error('[NeonDB] Auto-repair retry failed:', retryErr);
+          }
+        }
       }
     }
 
@@ -731,9 +860,50 @@ export const dbService = {
             updated_at = ${updated.updatedAt}
           WHERE id = ${id} AND user_id = ${userId}
         `;
+        const idx = localStore.agents.findIndex((a) => a.id === id);
+        if (idx >= 0) localStore.agents[idx] = updated;
+        saveLocalStore();
         return updated;
-      } catch (err) {
+      } catch (err: any) {
         console.warn('Neon update agent error:', err);
+        if (String(err?.message || '').includes('character varying') || err?.code === '22001') {
+          try {
+            console.log('[NeonDB] Structure repair during update: modifying text columns to TEXT and retrying...');
+            await sql`ALTER TABLE agents ALTER COLUMN avatar TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN system_prompt TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN description TYPE TEXT;`;
+            await sql`ALTER TABLE agents ALTER COLUMN skills TYPE TEXT;`;
+
+            await sql`
+              UPDATE agents SET
+                custom_name = ${updated.customName},
+                display_name = ${updated.displayName},
+                description = ${updated.description},
+                avatar = ${updated.avatar},
+                model_id = ${updated.modelId || 'gemini-2.5-flash'},
+                gender = ${updated.gender || 'neutral'},
+                system_prompt = ${updated.systemPrompt},
+                effort_level = ${updated.effortLevel},
+                skills = ${JSON.stringify(updated.skills)},
+                theme_color = ${updated.themeColor},
+                theme_preset = ${updated.themePreset},
+                theme_mode = ${updated.themeMode || 'dark'},
+                theme_bg = ${updated.themeBg || null},
+                theme_card = ${updated.themeCard || null},
+                theme_text = ${updated.themeText || null},
+                allows_file_uploads = ${updated.allowsFileUploads},
+                embed_enabled = ${updated.embedEnabled},
+                updated_at = ${updated.updatedAt}
+              WHERE id = ${id} AND user_id = ${userId}
+            `;
+            const idx = localStore.agents.findIndex((a) => a.id === id);
+            if (idx >= 0) localStore.agents[idx] = updated;
+            saveLocalStore();
+            return updated;
+          } catch (retryErr) {
+            console.error('[NeonDB] Update retry failed:', retryErr);
+          }
+        }
       }
     }
 

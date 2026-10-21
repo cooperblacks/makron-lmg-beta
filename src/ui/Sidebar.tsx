@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Bot, Camera, Check, HardDrive, Key, LogIn, LogOut, MessageSquare, Pencil, Plus, Trash2, User, X } from 'lucide-react';
+import { Bot, Camera, Check, Globe, HardDrive, Key, LogIn, LogOut, MessageSquare, Pencil, Plus, Trash2, User, X } from 'lucide-react';
 import { AuthUser, Conversation } from '../types';
 import { VerifiedBadge } from './VerifiedBadge';
 
@@ -138,8 +138,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-900 hover:text-neutral-900 dark:hover:text-neutral-200'
                   }`}
                 >
-                  <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
-                    <MessageSquare className="w-3.5 h-3.5 shrink-0 opacity-60" />
+                  <div className="flex items-center gap-2 min-w-0 flex-1 mr-1">
+                    {/* Mini sized avatar of custom agent or default icon */}
+                    {conv.avatar ? (
+                      conv.avatar.startsWith('data:image') || conv.avatar.startsWith('http') ? (
+                        <img
+                          src={conv.avatar}
+                          alt=""
+                          className="w-4 h-4 rounded-full object-cover shrink-0 ring-1 ring-emerald-500/50"
+                        />
+                      ) : (
+                        <span className="w-4 h-4 rounded-full bg-emerald-500/15 dark:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400 font-bold text-[10px] flex items-center justify-center shrink-0 ring-1 ring-emerald-500/30">
+                          {conv.avatar}
+                        </span>
+                      )
+                    ) : conv.isPublished ? (
+                      <span className="w-4 h-4 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold text-[10px] flex items-center justify-center shrink-0">
+                        ꫧ
+                      </span>
+                    ) : (
+                      <MessageSquare className="w-3.5 h-3.5 shrink-0 opacity-60" />
+                    )}
+
                     {editingId === conv.id ? (
                       <form onSubmit={(e) => saveRename(conv.id, e)} className="flex items-center gap-1 flex-1">
                         <input
@@ -164,6 +184,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       </span>
                     )}
                   </div>
+
+                  {/* Green Globe indicator on the right side for published custom agents */}
+                  {conv.isPublished && (
+                    <span
+                      title={`Published Custom Agent (/agent/${conv.publishedSlug || ''})`}
+                      className="mr-1 flex items-center shrink-0 text-emerald-500 dark:text-emerald-400"
+                    >
+                      <Globe className="w-3.5 h-3.5 drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
+                    </span>
+                  )}
 
                   {editingId !== conv.id && (
                     <>
