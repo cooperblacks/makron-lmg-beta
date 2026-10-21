@@ -12,17 +12,24 @@ import { db } from './storage/indexeddb';
 import {
   AgentCapabilities,
   AttachedFile,
+  AuthUser,
   Conversation,
   ExecutionState,
   Message,
   ReasoningLevel,
   UserSettings,
 } from './types';
+import { ApiKeysModal } from './ui/ApiKeysModal';
+import { AuthModal } from './ui/AuthModal';
 import { Composer } from './ui/Composer';
 import { ContextModal } from './ui/ContextModal';
+import { CustomAgentsModal } from './ui/CustomAgentsModal';
+import { EmbedAgentView } from './ui/EmbedAgentView';
 import { Header } from './ui/Header';
 import { MessageList } from './ui/MessageList';
 import { ModelModal } from './ui/ModelModal';
+import { ProfileModal } from './ui/ProfileModal';
+import { PublishedAgentView } from './ui/PublishedAgentView';
 import { SettingsModal } from './ui/SettingsModal';
 import { Sidebar } from './ui/Sidebar';
 import { WorkspaceDrawer } from './ui/WorkspaceDrawer';
@@ -71,8 +78,46 @@ export default function App() {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [previewFilePath, setPreviewFilePath] = useState<string | null>(null);
 
+  // Auth & Custom Agents State
+  const [authToken, setAuthToken] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? localStorage.getItem('makron_auth_token') : null
+  );
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isCustomAgentsModalOpen, setIsCustomAgentsModalOpen] = useState(false);
+  const [isApiKeysModalOpen, setIsApiKeysModalOpen] = useState(false);
+
+  // Routing check for published agents and embed widget
+  const currentPath = typeof window !== 'undefined' ? window.location.pathname : '/';
+  if (currentPath.startsWith('/embed/agent/')) {
+    const slug = currentPath.replace('/embed/agent/', '').split('/')[0];
+    return <EmbedAgentView customName={slug} />;
+  }
+  if (currentPath.startsWith('/agent/')) {
+    const slug = currentPath.replace('/agent/', '').split('/')[0];
+    return <PublishedAgentView customName={slug} />;
+  }
+
   // 1. Initial Load
   useEffect(() => {
+    // Validate session token if present
+    if (authToken) {
+      fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${authToken}` },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data && data.user) {
+            setAuthUser(data.user);
+          } else {
+            localStorage.removeItem('makron_auth_token');
+            setAuthToken(null);
+            setAuthUser(null);
+          }
+        })
+        .catch(() => {});
+    }
     const initApp = async () => {
       const savedSettings = await db.getSettings();
 
@@ -357,6 +402,7 @@ export default function App() {
         settings,
         reasoningLevel: activeLevel,
         capabilities: activeCaps,
+        recentMessages: messages,
       });
     } catch (err: any) {
       console.warn('Execution terminated:', err.message);
@@ -382,6 +428,22 @@ export default function App() {
     setIsWorkspaceOpen(true);
   };
 
+  const handleSignOut = async () => {
+    if (authToken) {
+      try {
+        await fetch('/api/auth/signout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+      } catch {
+        // ignore
+      }
+    }
+    localStorage.removeItem('makron_auth_token');
+    setAuthToken(null);
+    setAuthUser(null);
+  };
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 transition-colors">
       {/* Sidebar Navigation */}
@@ -402,6 +464,24 @@ export default function App() {
           setIsSidebarOpen(false);
           setIsSettingsModalOpen(true);
         }}
+        authUser={authUser}
+        onOpenAuth={() => {
+          setIsSidebarOpen(false);
+          setIsAuthModalOpen(true);
+        }}
+        onOpenProfile={() => {
+          setIsSidebarOpen(false);
+          setIsProfileModalOpen(true);
+        }}
+        onOpenAgents={() => {
+          setIsSidebarOpen(false);
+          setIsCustomAgentsModalOpen(true);
+        }}
+        onOpenApiKeys={() => {
+          setIsSidebarOpen(false);
+          setIsApiKeysModalOpen(true);
+        }}
+        onSignOut={handleSignOut}
       />
 
       {/* Main Workspace Frame */}
@@ -547,6 +627,47 @@ export default function App() {
           }
           await refreshStorage();
           await refreshWorkspaceFiles();
+        }}
+      />
+
+      {/* Account & Custom Agent Modals */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={(token, user) => {
+          setAuthToken(token);
+          setAuthUser(user);
+        }}
+      />
+
+      <ProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        user={authUser}
+        token={authToken}
+        onProfileUpdated={(updated) => setAuthUser(updated)}
+      />
+
+      <CustomAgentsModal
+        isOpen={isCustomAgentsModalOpen}
+        onClose={() => setIsCustomAgentsModalOpen(false)}
+        token={authToken}
+        user={authUser}
+        onOpenApiKeys={() => setIsApiKeysModalOpen(true)}
+      />
+
+      <ApiKeysModal
+        isOpen={isApiKeysModalOpen}
+        onClose={() => setIsApiKeysModalOpen(false)}
+        token={authToken}
+        onKeysUpdated={() => {
+          if (authToken) {
+            fetch('/api/auth/me', {
+              headers: { Authorization: `Bearer ${authToken}` },
+            })
+              .then((r) => r.json())
+              .then((d) => d?.user && setAuthUser(d.user));
+          }
         }}
       />
     </div>

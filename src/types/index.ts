@@ -160,16 +160,47 @@ export interface AgentCapabilities {
 
 export type UserTier = 'free' | 'paid';
 
+export type VerifiedType = 'paid' | 'celeb' | 'dev' | 'founder' | null;
+
 export interface AuthUser {
   id: string;
   email: string;
   name?: string;
+  username?: string;
+  avatar?: string;
   tier: UserTier;
+  verifiedType?: VerifiedType;
   agentCount?: number;
   apiKeysConfigured?: string[];
 }
 
-export type AgentThemePreset = 'slate' | 'emerald' | 'indigo' | 'crimson' | 'amber' | 'violet' | 'custom';
+export type AgentThemePreset =
+  | 'spring_blossom'
+  | 'spring_mint'
+  | 'spring_rain'
+  | 'summer_sun'
+  | 'summer_ocean'
+  | 'summer_sunset'
+  | 'autumn_maple'
+  | 'autumn_harvest'
+  | 'autumn_hearth'
+  | 'winter_frost'
+  | 'winter_midnight'
+  | 'winter_aurora'
+  | 'slate'
+  | 'emerald'
+  | 'indigo'
+  | 'crimson'
+  | 'amber'
+  | 'violet'
+  | 'custom';
+
+export interface PublicAgentOwner {
+  name?: string;
+  username?: string;
+  avatar?: string;
+  verifiedType?: VerifiedType;
+}
 
 export interface CustomAgent {
   id: string;
@@ -177,14 +208,21 @@ export interface CustomAgent {
   customName: string; // The URL slug: /agent/{custom-name}
   displayName: string;
   description?: string;
-  avatar: string; // Emoji, SVG, or icon name
+  avatar: string; // Base64 image data URL or emoji/symbol
+  modelId?: string; // Selected model for agent inference
+  gender?: 'male' | 'female' | 'neutral'; // Gender for text-to-speech voice
   systemPrompt: string; // Context & knowledge base
   effortLevel: ReasoningLevel;
   skills: string[]; // e.g. ['code_execution', 'file_generation', 'web_search', 'doc_extract']
-  themeColor: string; // Primary hex color or CSS color
+  themeColor: string; // Primary hex color
   themePreset: AgentThemePreset;
+  themeMode?: 'light' | 'dark';
+  themeBg?: string;
+  themeCard?: string;
+  themeText?: string;
   allowsFileUploads: boolean;
   embedEnabled: boolean;
+  owner?: PublicAgentOwner;
   createdAt: number;
   updatedAt: number;
 }

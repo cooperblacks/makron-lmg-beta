@@ -182,6 +182,9 @@ export class OrchestratorEngine {
     const apiKey = details.provider && details.provider !== 'local' ? ctx.settings.apiKeys?.[details.provider] : undefined;
 
     let finalMessages = options.messages;
+    if (!finalMessages && options.prompt) {
+      finalMessages = [{ role: 'user', content: options.prompt }];
+    }
 
     // Inject recent conversation history so the LLM remembers previous context, code, and questions
     if (finalMessages && ctx.recentMessages && ctx.recentMessages.length > 0) {
@@ -195,13 +198,13 @@ export class OrchestratorEngine {
           historyTurns.push({ role: 'user', content: msg.content });
         } else if (msg.role === 'assistant' && msg.content && msg.status !== 'error') {
           // Truncate overly long previous assistant messages in context to preserve token window
-          const content = msg.content.length > 2500 ? msg.content.slice(0, 2500) + '... [truncated previous output]' : msg.content;
+          const content = msg.content.length > 3000 ? msg.content.slice(0, 3000) + '... [truncated previous output]' : msg.content;
           historyTurns.push({ role: 'assistant', content });
         }
       }
 
-      // Keep recent turns (up to 12 most recent turns)
-      const trimmedHistory = historyTurns.slice(-12);
+      // Keep recent turns (up to 16 most recent turns)
+      const trimmedHistory = historyTurns.slice(-16);
 
       finalMessages = [
         ...(systemMsg ? [systemMsg] : []),
@@ -235,6 +238,15 @@ export class OrchestratorEngine {
     const { signal } = abortController;
 
     const startTime = Date.now();
+
+    // Ensure conversation's history of recent messages is available to the LLM
+    if (!ctx.recentMessages || ctx.recentMessages.length === 0) {
+      try {
+        ctx.recentMessages = await db.getMessages(ctx.conversationId);
+      } catch {
+        ctx.recentMessages = [];
+      }
+    }
 
     // 1. Ensure Model is genuinely loaded (No mock fallbacks!)
     const details = resolveModelDetails(ctx.modelId, ctx.settings.vendorModels);
@@ -308,25 +320,10 @@ export class OrchestratorEngine {
     eventBus.emit({ type: 'state_change', state: 'planning', messageId: ctx.messageId });
 
     // Check workspace state
-    const existingFiles = await VirtualFileSystem.listFiles(ctx.conversationId);
-    const workspaceSummary = existingFiles.length === 0
+    let existingFiles = await VirtualFileSystem.listFiles(ctx.conversationId);
+    let workspaceSummary = existingFiles.length === 0
       ? 'Virtual Workspace is currently empty.'
       : `Existing files:\n${existingFiles.map((f) => `- ${f.path} (${f.size} B)`).join('\n')}`;
-
-    const decisionPrompt = `You are a Makron AI agent. Assess the user's request.
-Determine if this task requires tools or virtual filesystem operations (such as creating code files in workspace, reading workspace files, running sandboxed code, fetching URLs, extracting documents) OR if it can be answered directly as conversation, analysis, code explanation, or math without files.
-
-USER REQUEST:
-"${ctx.userPrompt}"
-
-WORKSPACE STATE:
-${workspaceSummary}
-
-Respond with ONLY valid JSON:
-{
-  "mode": "direct" | "workflow",
-  "reasoning": "brief justification"
-}`;
 
     const level = ctx.reasoningLevel || 'auto';
 
@@ -381,9 +378,9 @@ Respond with ONLY valid JSON:
       return directMsg;
     }
 
-    // Check workspace state for multi-step planning
-    const existingFiles = await VirtualFileSystem.listFiles(ctx.conversationId);
-    const workspaceSummary = existingFiles.length === 0
+    // Refresh workspace state for multi-step planning
+    existingFiles = await VirtualFileSystem.listFiles(ctx.conversationId);
+    workspaceSummary = existingFiles.length === 0
       ? 'Virtual Workspace is currently empty.'
       : `Existing files:\n${existingFiles.map((f) => `- ${f.path} (${f.size} B)`).join('\n')}`;
 
@@ -1319,24 +1316,6 @@ new AppState();
     }
 
     return recordedChanges;
-  }
-      content: `/**
- * Generated solution by the AI agent
- * Purpose: ${prompt}
- */
-
-export function executeTask(): { success: boolean; timestamp: number } {
-  console.log("Executing task logic...");
-  return {
-    success: true,
-    timestamp: Date.now()
-  };
-}
-
-// Self-test
-console.log(executeTask());
-`,
-    };
   }
 }
 
