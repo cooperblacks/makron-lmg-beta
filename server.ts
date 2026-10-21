@@ -1,6 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
 import express, { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dbService, initDatabase } from './src/server/db';
@@ -11,11 +10,10 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'makron-secret-key-2026-production';
 
 app.use(express.json({ limit: '25mb' }));
 
-// Auth Middleware
+// Auth Middleware (pure session-token based, no JWT)
 interface AuthRequest extends Request {
   user?: AuthUser;
 }
@@ -28,11 +26,10 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email: string };
-    const user = await dbService.getUserById(decoded.id);
+    const user = await dbService.getUserBySessionToken(token);
 
     if (!user) {
-      return res.status(401).json({ error: 'User account not found' });
+      return res.status(401).json({ error: 'Invalid or expired session token' });
     }
 
     req.user = {
@@ -62,11 +59,10 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    const newUser = await dbService.createUser(email, password, name);
-    const token = jwt.sign({ id: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '30d' });
+    const { user: newUser, sessionToken } = await dbService.createUser(email, password, name);
 
     res.json({
-      token,
+      token: sessionToken,
       user: {
         id: newUser.id,
         email: newUser.email,
@@ -99,11 +95,11 @@ app.post('/api/auth/signin', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
+    const sessionToken = await dbService.createSession(user.id);
     const userAgents = await dbService.getAgentsByUserId(user.id);
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
 
     res.json({
-      token,
+      token: sessionToken,
       user: {
         id: user.id,
         email: user.email,
@@ -118,13 +114,35 @@ app.post('/api/auth/signin', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/auth/signout', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      await dbService.invalidateSession(token);
+    }
+    res.json({ success: true });
+  } catch {
+    res.json({ success: true });
+  }
+});
+
 app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const userAgents = await dbService.getAgentsByUserId(req.user!.id);
+    const user = await dbService.getUserById(req.user!.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const userAgents = await dbService.getAgentsByUserId(user.id);
     res.json({
       user: {
-        ...req.user,
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        username: user.username,
+        avatar: user.avatar,
+        tier: user.tier,
+        verifiedType: user.verifiedType,
         agentCount: userAgents.length,
+        apiKeysConfigured: Object.keys(user.apiKeys || {}).filter((k) => Boolean(user.apiKeys[k])),
       },
     });
   } catch (err: any) {
@@ -132,11 +150,37 @@ app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res: Response) => 
   }
 });
 
+app.put('/api/auth/profile', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, username, email, avatar, verifiedType } = req.body;
+    const updated = await dbService.updateUserProfile(req.user!.id, {
+      name,
+      username,
+      email,
+      avatar,
+      verifiedType,
+    });
+    res.json({
+      user: {
+        id: updated.id,
+        email: updated.email,
+        name: updated.name,
+        username: updated.username,
+        avatar: updated.avatar,
+        tier: updated.tier,
+        verifiedType: updated.verifiedType,
+        apiKeysConfigured: Object.keys(updated.apiKeys || {}).filter((k) => Boolean(updated.apiKeys[k])),
+      },
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update profile' });
+  }
+});
+
 app.get('/api/auth/keys', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const user = await dbService.getUserById(req.user!.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    // Return key presence without exposing raw secrets
     const summary: Record<string, boolean> = {};
     for (const [k, v] of Object.entries(user.apiKeys || {})) {
       summary[k] = Boolean(v && v.trim());
@@ -213,7 +257,6 @@ app.get('/api/public/agents/:customName', async (req: Request, res: Response) =>
       return res.status(404).json({ error: `Agent "${customName}" not found.` });
     }
 
-    // Public view: NEVER expose owner user ID or raw API keys!
     res.json({
       agent: {
         id: agent.id,
@@ -221,12 +264,19 @@ app.get('/api/public/agents/:customName', async (req: Request, res: Response) =>
         displayName: agent.displayName,
         description: agent.description,
         avatar: agent.avatar,
+        modelId: agent.modelId,
+        gender: agent.gender,
         effortLevel: agent.effortLevel,
         skills: agent.skills,
         themeColor: agent.themeColor,
         themePreset: agent.themePreset,
+        themeMode: agent.themeMode,
+        themeBg: agent.themeBg,
+        themeCard: agent.themeCard,
+        themeText: agent.themeText,
         allowsFileUploads: agent.allowsFileUploads,
         embedEnabled: agent.embedEnabled,
+        owner: agent.owner,
       },
     });
   } catch (err: any) {
@@ -253,13 +303,8 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
     const owner = await dbService.getUserById(agent.userId);
     const ownerApiKeys = owner?.apiKeys || {};
 
-    // Determine API Key: Agent owner's configured Gemini or OpenAI key, or system GEMINI_API_KEY
-    const geminiKey = ownerApiKeys.gemini || process.env.GEMINI_API_KEY;
-    const openaiKey = ownerApiKeys.openai;
-
     let responseText = '';
 
-    // Prepare context instructions
     const effortInstruction =
       agent.effortLevel === 'low'
         ? 'Provide direct, concise, immediate answers without preamble.'
@@ -269,9 +314,8 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
 
     const systemInstruction = `You are "${agent.displayName}", an AI assistant.\n${agent.description ? `Description: ${agent.description}\n` : ''}${agent.systemPrompt ? `Context & Directives:\n${agent.systemPrompt}\n` : ''}\nEffort & Reasoning Policy: ${effortInstruction}\nActive Capabilities: ${agent.skills.join(', ')}`;
 
-    // Build dialogue messages for model
     const priorTurns = Array.isArray(history)
-      ? history.slice(-8).map((h: { role: string; content: string }) => ({
+      ? history.slice(-12).map((h: { role: string; content: string }) => ({
           role: h.role === 'assistant' ? 'model' : 'user',
           text: h.content,
         }))
@@ -282,41 +326,53 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
       attachmentsText = '\n\nAttached User Documents:\n' + attachments.map((a: any) => `[File: ${a.name}]\n${a.content || a.extractedText || ''}`).join('\n\n');
     }
 
-    // Inference execution
-    if (geminiKey) {
+    const targetModel = agent.modelId || 'gemini-2.5-flash';
+    const lowerModel = targetModel.toLowerCase();
+
+    // 1. Anthropic Claude
+    if (lowerModel.includes('claude') && ownerApiKeys.claude) {
       try {
-        const ai = new GoogleGenAI({ apiKey: geminiKey });
-        const contents: any[] = [];
-
-        for (const turn of priorTurns) {
-          contents.push({ role: turn.role, parts: [{ text: turn.text }] });
-        }
-        contents.push({ role: 'user', parts: [{ text: message + attachmentsText }] });
-
-        const result = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents,
-          config: {
-            systemInstruction,
-            temperature: agent.effortLevel === 'low' ? 0.2 : 0.7,
+        const claudeMessages = [
+          ...priorTurns.map((t: any) => ({
+            role: t.role === 'model' ? 'assistant' : 'user',
+            content: t.text,
+          })),
+          { role: 'user', content: message + attachmentsText },
+        ];
+        const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': ownerApiKeys.claude,
+            'anthropic-version': '2023-06-01',
+            'Content-Type': 'application/json',
           },
+          body: JSON.stringify({
+            model: targetModel.includes('/') ? targetModel.split('/')[1] : targetModel,
+            system: systemInstruction,
+            messages: claudeMessages,
+            max_tokens: 2048,
+          }),
         });
-
-        responseText = result.text || 'I have processed your request.';
-      } catch (geminiErr: any) {
-        console.warn('Gemini call failed:', geminiErr);
-        responseText = `[Error generating response: ${geminiErr.message || String(geminiErr)}]`;
+        const cdata = await claudeRes.json();
+        responseText = cdata.content?.[0]?.text || 'No response from Claude.';
+      } catch (err: any) {
+        responseText = `[Claude Error: ${err.message}]`;
       }
-    } else if (openaiKey) {
+    }
+    // 2. OpenAI / Compatible (Groq, DeepSeek, Grok, Qwen, ZAI)
+    else if (
+      (lowerModel.includes('gpt') || lowerModel.includes('o1') || lowerModel.includes('o3') || lowerModel.includes('openai')) &&
+      ownerApiKeys.openai
+    ) {
       try {
         const fetchRes = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${openaiKey}`,
+            Authorization: `Bearer ${ownerApiKeys.openai}`,
           },
           body: JSON.stringify({
-            model: 'gpt-4o-mini',
+            model: targetModel.includes('/') ? targetModel.split('/')[1] : targetModel,
             messages: [
               { role: 'system', content: systemInstruction },
               ...priorTurns.map((t: any) => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text })),
@@ -330,9 +386,62 @@ app.post('/api/public/agents/:customName/chat', async (req: Request, res: Respon
       } catch (openAiErr: any) {
         responseText = `[OpenAI error: ${openAiErr.message}]`;
       }
-    } else {
-      // Fallback response with helpful information
-      responseText = `Hello! I am ${agent.displayName}. My owner has configured me with the following directives:\n\n${agent.systemPrompt || 'General assistance.'}\n\nTo enable full live AI inference, the agent owner can save their Gemini or OpenAI API key in their Makron account settings panel.`;
+    }
+    // 3. Groq
+    else if (lowerModel.includes('groq') || (lowerModel.includes('llama') && ownerApiKeys.groq)) {
+      try {
+        const fetchRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${ownerApiKeys.groq}`,
+          },
+          body: JSON.stringify({
+            model: targetModel.includes('/') ? targetModel.split('/')[1] : targetModel || 'llama-3.3-70b-versatile',
+            messages: [
+              { role: 'system', content: systemInstruction },
+              ...priorTurns.map((t: any) => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text })),
+              { role: 'user', content: message + attachmentsText },
+            ],
+            temperature: 0.3,
+          }),
+        });
+        const groqData = await fetchRes.json();
+        responseText = groqData.choices?.[0]?.message?.content || 'No response from Groq.';
+      } catch (err: any) {
+        responseText = `[Groq error: ${err.message}]`;
+      }
+    }
+    // 4. Gemini (or default)
+    else {
+      const geminiKey = ownerApiKeys.gemini || process.env.GEMINI_API_KEY;
+      if (geminiKey) {
+        try {
+          const ai = new GoogleGenAI({ apiKey: geminiKey });
+          const contents: any[] = [];
+
+          for (const turn of priorTurns) {
+            contents.push({ role: turn.role, parts: [{ text: turn.text }] });
+          }
+          contents.push({ role: 'user', parts: [{ text: message + attachmentsText }] });
+
+          const result = await ai.models.generateContent({
+            model: targetModel.startsWith('gemini') ? targetModel : 'gemini-2.5-flash',
+            contents,
+            config: {
+              systemInstruction,
+              temperature: agent.effortLevel === 'low' ? 0.2 : 0.7,
+            },
+          });
+
+          responseText = result.text || 'I have processed your request.';
+        } catch (geminiErr: any) {
+          console.warn('Gemini call failed:', geminiErr);
+          responseText = `[Error generating response: ${geminiErr.message || String(geminiErr)}]`;
+        }
+      } else {
+        responseText = `Hello! I am ${agent.displayName}. My owner has configured me with the following directives:\n\n${agent.systemPrompt || 'General assistance.'}\n\nTo enable live inference for this agent, configure the appropriate API key in your account settings.`;
+      }
     }
 
     res.json({
@@ -368,7 +477,7 @@ app.get('/embed.js', (req: Request, res: Response) => {
     host = url.origin;
   } catch(e) {}
 
-  var themeColor = script.getAttribute('data-color') || '#3b82f6';
+  var themeColor = script.getAttribute('data-color') || '#64748b';
 
   // Create floating circular launcher with "ꫧ" in center
   var launcher = document.createElement('div');

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Check, HardDrive, MessageSquare, Pencil, Plus, Trash2, X } from 'lucide-react';
-import { Conversation } from '../types';
+import { Bot, Camera, Check, HardDrive, Key, LogIn, LogOut, MessageSquare, Pencil, Plus, Trash2, User, X } from 'lucide-react';
+import { AuthUser, Conversation } from '../types';
+import { VerifiedBadge } from './VerifiedBadge';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -13,6 +14,12 @@ interface SidebarProps {
   onClose: () => void;
   storageUsage: { usage: number; quota: number };
   onOpenSettings?: () => void;
+  authUser: AuthUser | null;
+  onOpenAuth: () => void;
+  onOpenProfile?: () => void;
+  onOpenAgents: () => void;
+  onOpenApiKeys: () => void;
+  onSignOut: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -26,6 +33,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onClose,
   storageUsage,
   onOpenSettings,
+  authUser,
+  onOpenAuth,
+  onOpenProfile,
+  onOpenAgents,
+  onOpenApiKeys,
+  onSignOut,
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -214,6 +227,98 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </div>
               );
             })
+          )}
+        </div>
+
+        {/* Account Panel: Above storage section as requested */}
+        <div className="p-2.5 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-100/70 dark:bg-neutral-900/70">
+          {!authUser ? (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200">
+                  <User className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Cloud Account</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="w-full py-1.5 px-2.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-medium flex items-center justify-center gap-1.5 transition shadow-2xs cursor-pointer"
+              >
+                <LogIn className="w-3 h-3" />
+                <span>Sign In / Sign Up</span>
+              </button>
+            </div>
+          ) : (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  {/* Avatar: Click to open profile settings */}
+                  <div
+                    onClick={onOpenProfile}
+                    title="Click to customize avatar and profile"
+                    className="relative group cursor-pointer shrink-0"
+                  >
+                    <div className="w-7 h-7 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center overflow-hidden border border-neutral-300 dark:border-neutral-700 shadow-2xs group-hover:ring-2 group-hover:ring-blue-500 transition">
+                      {authUser.avatar && authUser.avatar.startsWith('data:image') ? (
+                        <img src={authUser.avatar} alt="Profile" className="w-full h-full object-cover" />
+                      ) : (
+                        <span>{(authUser.name || authUser.email || 'U')[0].toUpperCase()}</span>
+                      )}
+                    </div>
+                    <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white">
+                      <Camera className="w-2.5 h-2.5" />
+                    </div>
+                  </div>
+
+                  {/* Profile info: Click to open profile */}
+                  <div
+                    onClick={onOpenProfile}
+                    className="min-w-0 flex-1 cursor-pointer group"
+                    title="Click to view and edit profile settings"
+                  >
+                    <div className="flex items-center gap-1">
+                      <p className="text-[11px] font-semibold text-neutral-800 dark:text-neutral-200 truncate group-hover:text-blue-500 transition">
+                        {authUser.name || authUser.email.split('@')[0]}
+                      </p>
+                      <VerifiedBadge type={authUser.verifiedType} size="sm" />
+                    </div>
+                    <p className="text-[10px] text-neutral-500 dark:text-neutral-400 truncate font-mono">
+                      @{authUser.username || authUser.email.split('@')[0]}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onSignOut}
+                  title="Sign Out"
+                  className="p-1 text-neutral-400 hover:text-red-500 dark:hover:text-red-400 transition rounded cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={onOpenAgents}
+                  className="px-2 py-1 rounded bg-white dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 text-[10px] font-medium border border-neutral-200 dark:border-neutral-700 flex items-center justify-center gap-1 transition cursor-pointer"
+                >
+                  <Bot className="w-3 h-3 text-blue-500" />
+                  <span>My Agents</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onOpenApiKeys}
+                  className="px-2 py-1 rounded bg-white dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 text-[10px] font-medium border border-neutral-200 dark:border-neutral-700 flex items-center justify-center gap-1 transition cursor-pointer"
+                >
+                  <Key className="w-3 h-3 text-amber-500" />
+                  <span>API Keys</span>
+                </button>
+              </div>
+            </div>
           )}
         </div>
 
